@@ -1,0 +1,33 @@
+{
+  "server": {
+    "version": "0.1.0",
+    "url": "https://cdn.example.com/go-home/server/0.1.0/go-home-server-linux-amd64.tar.gz",
+    "sha256": ""
+  },
+  "home-server": {
+    "version": "0.1.0",
+    "url": "https://cdn.example.com/go-home/home-server/0.1.0/home-server-linux-amd64.tar.gz",
+    "sha256": ""
+  },
+  "client-pc": {
+    "version": "0.1.0",
+    "url": "https://cdn.example.com/go-home/client-pc/0.1.0/go-home-pc-win-x64.zip",
+    "sha256": ""
+  },
+  "client-ios": {
+    "version": "0.1.0",
+    "url": "https://cdn.example.com/go-home/client-ios/0.1.0/go-home-ios.ipa",
+    "sha256": ""
+  },
+  "client-android": {
+    "version": "0.1.0",
+    "url": "https://cdn.example.com/go-home/client-android/0.1.0/go-home.apk",
+    "sha256": ""
+  },
+  "client-harmony": {
+    "version": "0.1.0",
+    "url": "https://cdn.example.com/go-home/client-harmony/0.1.0/go-home.hap",
+    "sha256": ""
+  }
+}
+
