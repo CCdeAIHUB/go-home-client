@@ -5,18 +5,57 @@ on:
   pull_request:
 
 jobs:
-  client:
+  android-and-windows:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: "10.0.x"
-      - run: npm install
+      - run: npm ci
         working-directory: client-ui
       - run: npm run build
         working-directory: client-ui
-      - run: dotnet build client-pc/GoHome.Pc.csproj
+      - name: Copy client UI into Android assets
+        run: |
+          rm -rf client-android/app/src/main/assets/ui
+          mkdir -p client-android/app/src/main/assets/ui
+          cp -R client-ui/dist/. client-android/app/src/main/assets/ui/
+      - name: Build Android debug APK
+        run: gradle --project-dir client-android :app:assembleDebug
+      - name: Publish Windows win-x64 client
+        run: |
+          dotnet publish client-pc/GoHome.Pc.csproj \
+            -c Release \
+            -r win-x64 \
+            --self-contained true \
+            -o artifacts/windows
+          mkdir -p artifacts/windows/ui
+          cp -R client-ui/dist/. artifacts/windows/ui/
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-home-android-debug-apk
+          path: client-android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+      - name: Upload Windows client
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-home-windows-win-x64
+          path: artifacts/windows/**
+          if-no-files-found: error

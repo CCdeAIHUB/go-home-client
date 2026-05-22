@@ -1,11 +1,16 @@
 # Android 客户端
 
-Android 客户端后续使用 Kotlin + WebView + VpnService：
+Android 客户端当前提供可编译的 Kotlin + WebView 壳：
 
-- WebView 加载 `client-ui` 构建产物。
-- VpnService 提供虚拟网络和家庭网段分流。
-- UDP 打洞与国密协议由原生层实现，通过 JSAPI 暴露给前端。
-- 不承诺完整二层透明能力，超出能力的数据由家庭服务器过滤。
+- GitHub Actions 先构建 `client-ui`。
+- 构建后的前端文件复制到 Android assets。
+- Android APK 通过 Actions Artifacts 提供下载。
+- 原生层预留 `GoHomeAPI` 桥接入口。
 
-本目录当前保留平台工程边界，完整 Gradle 工程将在实现移动端阶段生成。
+后续实现继续接入：
 
+- `VpnService` 家庭网段分流。
+- UDP 打洞与国密协议。
+- 设备映射、状态、日志与 OTA 原生能力。
+
+当前 APK 是客户端壳产物，不包含完整隧道数据面。
