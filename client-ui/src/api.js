@@ -1,60 +1,64 @@
-const mockFamilies = [
-  {
-    id: 1,
-    name: '示例家庭',
-    visibility: 'public',
-    home_server_online: true,
-    lan_cidr: '192.168.3.0/24'
-  }
-]
-
 export function api() {
   if (window.GoHomeAPI) return window.GoHomeAPI
-  return mockAPI
+  return controlAPI
 }
 
-const wait = (value, delay = 350) =>
-  new Promise((resolve) => setTimeout(() => resolve(value), delay))
-
-const mockAPI = {
+const controlAPI = {
   async connectServer(server, authCode) {
-    if (!server || !authCode) throw new Error('请输入服务器地址和授权码')
-    return wait({ ok: true })
+    return request('/api/connect', {
+      method: 'POST',
+      body: { server, auth_code: authCode }
+    })
   },
   async disconnectServer() {
-    return wait({ ok: true })
+    return request('/api/disconnect', { method: 'POST' })
   },
   async getConnectionStatus() {
-    return wait({ websocket: 'connected', udp: 'idle', grace_seconds: 0 })
+    return request('/api/status')
   },
   async listFamilies() {
-    return wait(mockFamilies)
+    return request('/api/families')
   },
   async checkNetworkConflict(family) {
-    return wait({ conflict: family.lan_cidr === '192.168.3.0/24', lan_cidr: family.lan_cidr })
+    return request('/api/conflict', {
+      method: 'POST',
+      body: { lan_cidr: family.lan_cidr || '' }
+    })
   },
   async requestLayer3Permission() {
-    return wait({ granted: true })
+    return { granted: true }
   },
   async connectFamily(familyID, options) {
-    return wait({
-      family_id: familyID,
-      mode: options.mode,
-      client_home_ip: '192.168.3.200',
-      virtual_cidr: options.virtual_cidr || '',
-      devices: [
-        { name: 'NAS', real_ip: '192.168.3.5', virtual_ip: options.virtual_cidr ? '192.168.6.5' : '192.168.3.5' },
-        { name: 'Camera', real_ip: '192.168.3.22', virtual_ip: options.virtual_cidr ? '192.168.6.22' : '192.168.3.22' }
-      ]
+    return request('/api/tunnel/connect', {
+      method: 'POST',
+      body: {
+        family_id: familyID,
+        mode: options.mode,
+        virtual_cidr: options.virtual_cidr || '',
+        client_virtual_mac: options.client_virtual_mac || ''
+      }
     })
   },
   async getTrafficStats() {
-    return wait({ up: 128000, down: 952000, loss: 0.1, latency_ms: 28 })
+    return request('/api/stats')
   },
   async getTunnelStatus() {
-    return wait({ websocket: 'connected', udp: 'connected', grace_seconds: 0 })
+    return request('/api/status')
   },
   async checkUpdate() {
-    return wait({ latest: '0.1.0', current: '0.1.0', update: false })
+    return request('/api/update')
   }
+}
+
+async function request(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  })
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    throw new Error(payload.error || '客户端后端不可用')
+  }
+  return payload
 }

@@ -48,7 +48,7 @@ jobs:
         run: gradle --project-dir client-android :app:assembleDebug
       - name: Publish Windows win-x64 client
         run: |
-          GOOS=windows GOARCH=amd64 go build -o artifacts/windows/go-home-client-core.exe ./cmd/client-core
+          GOOS=windows GOARCH=amd64 go build -o ../artifacts/windows/go-home-client-core.exe ./cmd/client-core
         working-directory: client-core
       - name: Publish Windows win-x64 shell
         run: |

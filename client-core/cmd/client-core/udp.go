@@ -27,9 +27,24 @@ type punchClient struct {
 	sendSeq uint64
 	ready   chan tunnel.Ready
 	pong    chan []byte
+	packets chan []byte
 
 	punchStop chan struct{}
 	punchOnce sync.Once
+
+	statsMu   sync.Mutex
+	up        uint64
+	down      uint64
+	pings     uint64
+	pongs     uint64
+	lastRTTMS int64
+}
+
+type punchStats struct {
+	Up    uint64
+	Down  uint64
+	Loss  float64
+	RTTMS int64
 }
 
 func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePunchOffer) (*punchClient, error) {
@@ -62,6 +77,7 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 		peer:      peer,
 		ready:     make(chan tunnel.Ready, 1),
 		pong:      make(chan []byte, 1),
+		packets:   make(chan []byte, 64),
 		punchStop: make(chan struct{}),
 	}, nil
 }
@@ -83,6 +99,10 @@ func (c *punchClient) Connect(waitCtx, runCtx context.Context) (tunnel.Ready, er
 
 func (c *punchClient) VerifyPing(ctx context.Context) error {
 	payload := []byte(fmt.Sprintf("ping-%d", time.Now().UnixNano()))
+	started := time.Now()
+	c.statsMu.Lock()
+	c.pings++
+	c.statsMu.Unlock()
 	if err := c.sendFrame(tunnel.FramePing, payload); err != nil {
 		return err
 	}
@@ -93,6 +113,10 @@ func (c *punchClient) VerifyPing(ctx context.Context) error {
 		if string(pong) != string(payload) {
 			return fmt.Errorf("pong payload mismatch: %q", pong)
 		}
+		c.statsMu.Lock()
+		c.pongs++
+		c.lastRTTMS = time.Since(started).Milliseconds()
+		c.statsMu.Unlock()
 		return nil
 	}
 }
@@ -148,6 +172,9 @@ func (c *punchClient) readLoop(ctx context.Context, errs chan<- error) {
 			}
 		}
 		packet := append([]byte(nil), buf[:n]...)
+		c.statsMu.Lock()
+		c.down += uint64(n)
+		c.statsMu.Unlock()
 		if err := c.handlePacket(packet, addr); err != nil {
 			log.Printf("udp packet rejected from %s: %v", addr.String(), err)
 		}
@@ -197,6 +224,12 @@ func (c *punchClient) handlePacket(packet []byte, addr net.Addr) error {
 			default:
 			}
 			return nil
+		case tunnel.FrameIPv4:
+			select {
+			case c.packets <- append([]byte(nil), frame.Payload...):
+			default:
+			}
+			return nil
 		default:
 			return fmt.Errorf("unsupported secure frame type %d", frame.Type)
 		}
@@ -213,6 +246,11 @@ func (c *punchClient) sendHello() error {
 		return errors.New("home peer is unavailable")
 	}
 	_, err := c.conn.WriteTo(c.hello, peer)
+	if err == nil {
+		c.statsMu.Lock()
+		c.up += uint64(len(c.hello))
+		c.statsMu.Unlock()
+	}
 	return err
 }
 
@@ -230,6 +268,11 @@ func (c *punchClient) sendFrame(frameType byte, payload []byte) error {
 		return err
 	}
 	_, err = c.conn.WriteTo(packet, peer)
+	if err == nil {
+		c.statsMu.Lock()
+		c.up += uint64(len(packet))
+		c.statsMu.Unlock()
+	}
 	return err
 }
 
@@ -243,4 +286,27 @@ func (c *punchClient) stopPunching() {
 	c.punchOnce.Do(func() {
 		close(c.punchStop)
 	})
+}
+
+func (c *punchClient) Stats() punchStats {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+	loss := 0.0
+	if c.pings > 0 && c.pongs < c.pings {
+		loss = float64(c.pings-c.pongs) / float64(c.pings) * 100
+	}
+	return punchStats{
+		Up:    c.up,
+		Down:  c.down,
+		Loss:  loss,
+		RTTMS: c.lastRTTMS,
+	}
+}
+
+func (c *punchClient) SendIPv4(packet []byte) error {
+	return c.sendFrame(tunnel.FrameIPv4, packet)
+}
+
+func (c *punchClient) Packets() <-chan []byte {
+	return c.packets
 }

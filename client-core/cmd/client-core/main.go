@@ -32,7 +32,16 @@ func main() {
 	identityFile := flag.String("identity-file", defaultIdentityFile(), "SM2 identity persistence file")
 	timeout := flag.Duration("timeout", 20*time.Second, "direct UDP handshake timeout")
 	once := flag.Bool("once", false, "exit after direct UDP handshake and encrypted ping verification")
+	controlAddr := flag.String("control-addr", "", "local HTTP control address for UI shells")
+	uiDir := flag.String("ui-dir", "", "built client UI directory served by the local control address")
 	flag.Parse()
+
+	if *controlAddr != "" {
+		if err := runControl(*controlAddr, *uiDir, *udpPort, *identityFile); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
 	identity, err := security.LoadOrCreateIdentity(*identityFile)
 	if err != nil {
@@ -55,7 +64,7 @@ func main() {
 	}
 	defer rpc.Close()
 	rpc.HandleEvents(func(env protocol.Envelope) {
-		handleServerEvent(rpc, env)
+		answerLatencyProbe(rpc, env)
 	})
 
 	now := time.Now()
@@ -154,7 +163,7 @@ func requestOffer(ctx context.Context, rpc *rpcClient, familyID int64, udpPort i
 	return offer, nil
 }
 
-func handleServerEvent(rpc *rpcClient, env protocol.Envelope) {
+func answerLatencyProbe(rpc *rpcClient, env protocol.Envelope) {
 	if env.Action != protocol.EventDeviceLatencyProbe {
 		return
 	}
