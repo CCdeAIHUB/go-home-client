@@ -114,8 +114,10 @@ object GoHomeTunnelRuntime {
             if (packet != null) {
                 when (packetKind(packet.bytes)) {
                     PACKET_PROBE -> {
-                        currentPeer = packet.source
-                        synchronized(lock) { peer = currentPeer }
+                        if (controlJSON(packet.bytes).optString("session_id") == currentSessionID) {
+                            currentPeer = packet.source
+                            synchronized(lock) { peer = currentPeer }
+                        }
                     }
                     PACKET_FRAME -> {
                         val frame = openFrame(currentKey, packet.bytes)
@@ -356,6 +358,11 @@ object GoHomeTunnelRuntime {
 
     private fun controlPacket(kind: Byte, payload: JSONObject): ByteArray {
         return magic + byteArrayOf(VERSION, kind) + payload.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    private fun controlJSON(packet: ByteArray): JSONObject {
+        packetKind(packet)
+        return JSONObject(packet.copyOfRange(magic.size + 2, packet.size).toString(Charsets.UTF_8))
     }
 
     private fun sealFrame(key: ByteArray, currentSessionID: String, sequence: Long, type: Byte, payload: ByteArray): ByteArray {

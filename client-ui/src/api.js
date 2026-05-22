@@ -190,6 +190,7 @@ function handleAndroidMessage(event) {
     androidRPC('stats.latency_pong', { probe_id: env.params?.probe_id }).catch(() => {})
   }
   if (env.action === 'device.force_offline') {
+    window.GoHomeNative.disconnectTunnel()
     androidState.ws?.close()
   }
 }
