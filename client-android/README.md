@@ -4,6 +4,7 @@ Android 客户端当前提供可编译的 Kotlin + WebView 壳：
 
 - GitHub Actions 先构建 `client-ui`。
 - 构建后的前端文件复制到 Android assets。
+- WebView 通过 `WebViewAssetLoader` 以 `https://appassets.androidplatform.net` 加载 assets 中的模块化前端。
 - Android APK 通过 Actions Artifacts 提供下载。
 - 原生层预留 `GoHomeAPI` 桥接入口。
 

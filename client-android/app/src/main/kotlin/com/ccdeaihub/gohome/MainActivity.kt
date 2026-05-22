@@ -2,10 +2,14 @@ package com.ccdeaihub.gohome
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.net.Uri
 import android.os.Bundle
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
-import android.webkit.WebViewClient
+import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewClientCompat
 
 class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
@@ -13,12 +17,33 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val webView = WebView(this)
+        val assetLoader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
+
+        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
-        webView.webViewClient = WebViewClient()
+        webView.settings.allowFileAccess = false
+        webView.webViewClient = LocalContentClient(assetLoader)
         webView.addJavascriptInterface(GoHomeBridge(), "GoHomeNative")
-        webView.loadUrl("file:///android_asset/ui/index.html")
+        webView.loadUrl("https://appassets.androidplatform.net/assets/ui/index.html")
         setContentView(webView)
+    }
+
+    private class LocalContentClient(
+        private val assetLoader: WebViewAssetLoader
+    ) : WebViewClientCompat() {
+        override fun shouldInterceptRequest(
+            view: WebView,
+            request: WebResourceRequest
+        ): WebResourceResponse? {
+            return assetLoader.shouldInterceptRequest(request.url)
+        }
+
+        override fun shouldInterceptRequest(view: WebView, url: String): WebResourceResponse? {
+            return assetLoader.shouldInterceptRequest(Uri.parse(url))
+        }
     }
 
     class GoHomeBridge {
@@ -29,4 +54,3 @@ class MainActivity : Activity() {
         fun status(): String = "native-shell-ready"
     }
 }
-
