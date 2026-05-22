@@ -313,7 +313,14 @@ func (m *clientManager) RefreshPublicLatency(ctx context.Context) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	raw, err := rpc.Call(ctx, protocol.ActionPing, map[string]any{})
+	m.mu.RLock()
+	authCode := m.authCode
+	m.mu.RUnlock()
+	now := time.Now()
+	raw, err := rpc.Call(ctx, protocol.ActionPing, protocol.HeartbeatParams{
+		TimeKey:   security.GenerateTimeKey(authCode, now),
+		Timestamp: now.Unix(),
+	})
 	if err != nil {
 		m.setRPCError(err)
 		return 0, err
@@ -448,9 +455,9 @@ func (m *clientManager) heartbeatLoop(rpc *rpcClient) {
 		}
 		now := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		_, err := rpc.Call(ctx, protocol.ActionPing, map[string]any{
-			"time_key":  security.GenerateTimeKey(authCode, now),
-			"timestamp": now.Unix(),
+		_, err := rpc.Call(ctx, protocol.ActionPing, protocol.HeartbeatParams{
+			TimeKey:   security.GenerateTimeKey(authCode, now),
+			Timestamp: now.Unix(),
 		})
 		cancel()
 		if err != nil {
