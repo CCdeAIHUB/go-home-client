@@ -226,6 +226,10 @@ func (c *rpcClient) Close() error {
 	return c.conn.Close()
 }
 
+func (c *rpcClient) Done() <-chan struct{} {
+	return c.closed
+}
+
 func (c *rpcClient) Call(ctx context.Context, action string, params any) (json.RawMessage, error) {
 	id := c.nextID()
 	env, err := protocol.Request(id, action, params)

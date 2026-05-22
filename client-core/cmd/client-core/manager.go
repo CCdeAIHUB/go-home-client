@@ -31,7 +31,11 @@ type clientManager struct {
 	tunnel       *managedTunnel
 	publicRTTMS  int64
 	lastRPCError string
+	graceUntil   time.Time
+	reconnect    context.CancelFunc
 }
+
+const websocketGracePeriod = 30 * time.Second
 
 type managedTunnel struct {
 	client    *punchClient
@@ -103,10 +107,28 @@ func (m *clientManager) ConnectServer(ctx context.Context, server, authCode stri
 	}
 	m.Disconnect()
 
-	rpc, err := dialRPC(ctx, websocketURL(server))
+	rpc, err := m.dialAndAuth(ctx, server, authCode)
 	if err != nil {
 		m.setRPCError(err)
 		return err
+	}
+	m.mu.Lock()
+	m.rpc = rpc
+	m.server = server
+	m.authCode = authCode
+	m.lastRPCError = ""
+	m.graceUntil = time.Time{}
+	m.mu.Unlock()
+	m.watchRPC(rpc)
+
+	_, _ = m.RefreshPublicLatency(ctx)
+	return nil
+}
+
+func (m *clientManager) dialAndAuth(ctx context.Context, server, authCode string) (*rpcClient, error) {
+	rpc, err := dialRPC(ctx, websocketURL(server))
+	if err != nil {
+		return nil, err
 	}
 	rpc.HandleEvents(func(env protocol.Envelope) {
 		answerLatencyProbe(rpc, env)
@@ -123,19 +145,9 @@ func (m *clientManager) ConnectServer(ctx context.Context, server, authCode stri
 		UDPPort:    m.udpPort,
 	}); err != nil {
 		_ = rpc.Close()
-		m.setRPCError(err)
-		return err
+		return nil, err
 	}
-
-	m.mu.Lock()
-	m.rpc = rpc
-	m.server = server
-	m.authCode = authCode
-	m.lastRPCError = ""
-	m.mu.Unlock()
-
-	_, _ = m.RefreshPublicLatency(ctx)
-	return nil
+	return rpc, nil
 }
 
 func (m *clientManager) Disconnect() {
@@ -145,9 +157,18 @@ func (m *clientManager) Disconnect() {
 	rpc := m.rpc
 	m.rpc = nil
 	m.families = nil
+	m.graceUntil = time.Time{}
+	reconnect := m.reconnect
+	m.reconnect = nil
 	m.mu.Unlock()
 
+	if reconnect != nil {
+		reconnect()
+	}
 	if currentTunnel != nil {
+		if currentTunnel.link != nil {
+			_ = currentTunnel.link.Close()
+		}
 		currentTunnel.cancel()
 	}
 	if rpc != nil {
@@ -244,6 +265,14 @@ func (m *clientManager) TunnelStatus() tunnelStatus {
 	status := tunnelStatus{WebSocket: "idle", UDP: "idle", LastError: m.lastRPCError}
 	if m.rpc != nil {
 		status.WebSocket = "connected"
+	} else if m.reconnect != nil {
+		status.WebSocket = "reconnecting"
+	}
+	if !m.graceUntil.IsZero() {
+		status.GraceSeconds = graceSeconds(m.graceUntil, time.Now())
+		if status.GraceSeconds > 0 {
+			status.WebSocket = "grace"
+		}
 	}
 	if m.tunnel != nil {
 		status.UDP = "connected"
@@ -327,6 +356,116 @@ func (m *clientManager) setRPCError(err error) {
 	m.mu.Lock()
 	m.lastRPCError = err.Error()
 	m.mu.Unlock()
+}
+
+func (m *clientManager) watchRPC(rpc *rpcClient) {
+	go func() {
+		<-rpc.Done()
+		m.rpcClosed(rpc)
+	}()
+	go m.heartbeatLoop(rpc)
+}
+
+func (m *clientManager) rpcClosed(rpc *rpcClient) {
+	m.mu.Lock()
+	if m.rpc != rpc {
+		m.mu.Unlock()
+		return
+	}
+	m.rpc = nil
+	m.lastRPCError = "public server websocket disconnected"
+	server := m.server
+	authCode := m.authCode
+	deadline := time.Now().Add(websocketGracePeriod)
+	if m.tunnel != nil {
+		m.graceUntil = deadline
+	} else {
+		m.graceUntil = time.Time{}
+	}
+	if m.reconnect != nil {
+		m.reconnect()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.reconnect = cancel
+	m.mu.Unlock()
+
+	go m.reconnectLoop(ctx, server, authCode, deadline)
+}
+
+func (m *clientManager) reconnectLoop(ctx context.Context, server, authCode string, deadline time.Time) {
+	for time.Now().Before(deadline) {
+		attemptCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		rpc, err := m.dialAndAuth(attemptCtx, server, authCode)
+		cancel()
+		if err == nil {
+			m.mu.Lock()
+			if ctx.Err() != nil {
+				m.mu.Unlock()
+				_ = rpc.Close()
+				return
+			}
+			m.rpc = rpc
+			m.lastRPCError = ""
+			m.graceUntil = time.Time{}
+			m.reconnect = nil
+			m.mu.Unlock()
+			m.watchRPC(rpc)
+			return
+		}
+		m.setRPCError(err)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	m.mu.Lock()
+	active := m.tunnel
+	m.tunnel = nil
+	m.graceUntil = time.Time{}
+	m.lastRPCError = "public server websocket reconnect grace period expired"
+	m.mu.Unlock()
+	if active != nil {
+		if active.link != nil {
+			_ = active.link.Close()
+		}
+		active.cancel()
+	}
+}
+
+func (m *clientManager) heartbeatLoop(rpc *rpcClient) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		m.mu.RLock()
+		current := m.rpc
+		authCode := m.authCode
+		m.mu.RUnlock()
+		if current != rpc {
+			return
+		}
+		now := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		_, err := rpc.Call(ctx, protocol.ActionPing, map[string]any{
+			"time_key":  security.GenerateTimeKey(authCode, now),
+			"timestamp": now.Unix(),
+		})
+		cancel()
+		if err != nil {
+			_ = rpc.Close()
+			return
+		}
+	}
+}
+
+func graceSeconds(deadline, now time.Time) int {
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	return int((remaining + time.Second - 1) / time.Second)
 }
 
 func (t *managedTunnel) view() tunnelView {

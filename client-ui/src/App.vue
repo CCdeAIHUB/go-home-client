@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive } from 'vue'
 import {
   Activity,
   Cable,
@@ -37,6 +37,19 @@ const state = reactive({
 })
 
 const currentFamily = computed(() => state.selectedFamily)
+let statusTimer = null
+
+onMounted(() => {
+  statusTimer = window.setInterval(() => {
+    if (state.page === 'status' && state.tunnel) {
+      refreshStatus().catch(() => {})
+    }
+  }, 1000)
+})
+
+onBeforeUnmount(() => {
+  window.clearInterval(statusTimer)
+})
 
 async function connectServer() {
   state.error = ''
@@ -234,6 +247,10 @@ function formatBytes(value) {
         <article>
           <span>家庭侧地址</span>
           <strong>{{ state.tunnel?.client_home_ip || '-' }}</strong>
+        </article>
+        <article v-if="state.status.grace_seconds">
+          <span>宽限期</span>
+          <strong>{{ state.status.grace_seconds }} s</strong>
         </article>
       </div>
 
