@@ -1,0 +1,531 @@
+package com.ccdeaihub.gohome
+
+import android.app.Activity
+import android.content.Intent
+import android.net.VpnService
+import android.os.ParcelFileDescriptor
+import android.util.Base64
+import org.bouncycastle.asn1.ASN1EncodableVector
+import org.bouncycastle.asn1.ASN1Integer
+import org.bouncycastle.asn1.DEROctetString
+import org.bouncycastle.asn1.DERSequence
+import org.bouncycastle.crypto.engines.SM2Engine
+import org.bouncycastle.crypto.engines.SM4Engine
+import org.bouncycastle.crypto.modes.GCMBlockCipher
+import org.bouncycastle.crypto.params.AEADParameters
+import org.bouncycastle.crypto.params.KeyParameter
+import org.bouncycastle.crypto.params.ParametersWithRandom
+import org.bouncycastle.crypto.util.PublicKeyFactory
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.math.BigInteger
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.security.SecureRandom
+import kotlin.concurrent.thread
+import kotlin.math.min
+
+object GoHomeTunnelRuntime {
+    private const val VERSION: Byte = 1
+    private const val PACKET_PROBE: Byte = 1
+    private const val PACKET_HELLO: Byte = 2
+    private const val PACKET_FRAME: Byte = 3
+    private const val FRAME_READY: Byte = 1
+    private const val FRAME_KEEPALIVE: Byte = 2
+    private const val FRAME_PONG: Byte = 4
+    private const val FRAME_IPV4: Byte = 5
+    private const val GCM_NONCE_SIZE = 12
+    private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
+    private val random = SecureRandom()
+    private val lock = Object()
+
+    private var socket: DatagramSocket? = null
+    private var sessionID = ""
+    private var sessionKey: ByteArray? = null
+    private var peer: InetSocketAddress? = null
+    private var sendSequence = 0L
+    private var replay = ReplayWindow()
+    private var running = false
+    private var udpConnected = false
+    private var lastError = ""
+    private var uploaded = 0L
+    private var downloaded = 0L
+    private var tunnelFd: ParcelFileDescriptor? = null
+    private var tunInput: FileInputStream? = null
+    private var tunOutput: FileOutputStream? = null
+
+    fun prepare(deviceID: String): JSONObject {
+        stop(null)
+        val prepared = DatagramSocket(0)
+        prepared.soTimeout = 450
+        synchronized(lock) {
+            socket = prepared
+            lastError = ""
+            uploaded = 0
+            downloaded = 0
+        }
+        return JSONObject()
+            .put("udp_port", prepared.localPort)
+            .put("client_virtual_mac", virtualMAC(deviceID))
+    }
+
+    fun connect(activity: Activity, rawOffer: String, mode: String, virtualCIDR: String): JSONObject {
+        val offer = JSONObject(rawOffer)
+        val currentSocket = synchronized(lock) { socket } ?: throw IllegalStateException("UDP socket is not prepared")
+        val currentSessionID = offer.getString("session_id")
+        val clientID = offer.getJSONObject("client").getString("device_id")
+        val server = offer.getJSONObject("server")
+        val currentKey = ByteArray(16).also(random::nextBytes)
+        val encryptedKey = encryptSessionKey(server.getString("public_key"), currentKey)
+        val hello = controlPacket(
+            PACKET_HELLO,
+            JSONObject()
+                .put("session_id", currentSessionID)
+                .put("client_device_id", clientID)
+                .put("encrypted_session_key", Base64.encodeToString(encryptedKey, Base64.NO_WRAP))
+        )
+        var currentPeer = parseEndpoint(server.getString("endpoint"))
+        val deadline = System.currentTimeMillis() + 12_000L
+        var waitMillis = 120
+
+        synchronized(lock) {
+            sessionID = currentSessionID
+            sessionKey = currentKey
+            peer = currentPeer
+            sendSequence = 0
+            replay = ReplayWindow()
+            udpConnected = false
+            lastError = ""
+        }
+
+        while (System.currentTimeMillis() < deadline) {
+            send(currentSocket, currentPeer, hello)
+            val untilNextHello = min(waitMillis, (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
+            val packet = receive(currentSocket, untilNextHello)
+            if (packet != null) {
+                when (packetKind(packet.bytes)) {
+                    PACKET_PROBE -> {
+                        currentPeer = packet.source
+                        synchronized(lock) { peer = currentPeer }
+                    }
+                    PACKET_FRAME -> {
+                        val frame = openFrame(currentKey, packet.bytes)
+                        if (frame.sessionID == currentSessionID && frame.type == FRAME_READY && replay.accept(frame.sequence)) {
+                            synchronized(lock) {
+                                peer = packet.source
+                                udpConnected = true
+                                running = true
+                            }
+                            val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
+                            startVpn(activity, ready, mode, virtualCIDR)
+                            startUDPLoop(currentSocket, currentKey, currentSessionID)
+                            startKeepaliveLoop()
+                            return readyToView(ready, mode, virtualCIDR)
+                        }
+                    }
+                }
+            }
+            waitMillis = min(waitMillis + 120, 1_000)
+        }
+        synchronized(lock) {
+            lastError = "UDP direct tunnel handshake timed out"
+        }
+        throw IllegalStateException(lastError)
+    }
+
+    fun attachTunnel(fd: ParcelFileDescriptor?) {
+        if (fd == null) return
+        synchronized(lock) {
+            tunnelFd?.close()
+            tunInput?.close()
+            tunOutput?.close()
+            tunnelFd = fd
+            tunInput = FileInputStream(fd.fileDescriptor)
+            tunOutput = FileOutputStream(fd.fileDescriptor)
+        }
+        startTunReadLoop()
+    }
+
+    fun protectSocket(service: VpnService) {
+        synchronized(lock) {
+            socket?.let { service.protect(it) }
+        }
+    }
+
+    fun status(): JSONObject {
+        synchronized(lock) {
+            return JSONObject()
+                .put("udp", if (udpConnected) "connected" else "idle")
+                .put("last_error", lastError)
+        }
+    }
+
+    fun stats(): JSONObject {
+        synchronized(lock) {
+            return JSONObject()
+                .put("up", uploaded)
+                .put("down", downloaded)
+                .put("loss", 0)
+                .put("tunnel_rtt_ms", 0)
+        }
+    }
+
+    fun stop(activity: Activity?) {
+        synchronized(lock) {
+            running = false
+            udpConnected = false
+            sessionID = ""
+            sessionKey = null
+            peer = null
+            sendSequence = 0
+            replay = ReplayWindow()
+            socket?.close()
+            socket = null
+            tunInput?.close()
+            tunInput = null
+            tunOutput?.close()
+            tunOutput = null
+            tunnelFd?.close()
+            tunnelFd = null
+        }
+        activity?.stopService(Intent(activity, GoHomeVpnService::class.java))
+    }
+
+    fun localNetworkConflict(cidr: String): Boolean {
+        val target = IPv4Prefix.parse(cidr) ?: return false
+        val interfaces = NetworkInterface.getNetworkInterfaces() ?: return false
+        while (interfaces.hasMoreElements()) {
+            val item = interfaces.nextElement()
+            if (!item.isUp || item.isLoopback) continue
+            for (address in item.interfaceAddresses) {
+                val ipv4 = address.address as? Inet4Address ?: continue
+                val prefix = IPv4Prefix.fromAddress(ipv4.address, address.networkPrefixLength.toInt()) ?: continue
+                if (target.overlaps(prefix)) return true
+            }
+        }
+        return false
+    }
+
+    private fun startVpn(activity: Activity, ready: JSONObject, mode: String, virtualCIDR: String) {
+        val homeIP = ready.optString("client_home_ip")
+        val realCIDR = ready.optString("lan_cidr")
+        if (homeIP.isBlank() || realCIDR.isBlank()) {
+            throw IllegalStateException("home server did not lease a client IPv4 address")
+        }
+        val routeCIDR = if (mode == "mapped") virtualCIDR else realCIDR
+        val clientAddress = if (mode == "mapped") mappedAddress(homeIP, realCIDR, virtualCIDR) else homeIP
+        val intent = Intent(activity, GoHomeVpnService::class.java)
+            .putExtra(GoHomeVpnService.EXTRA_HOME_CIDR, routeCIDR)
+            .putExtra(GoHomeVpnService.EXTRA_VIRTUAL_ADDRESS, clientAddress)
+        activity.startService(intent)
+    }
+
+    private fun readyToView(ready: JSONObject, mode: String, virtualCIDR: String): JSONObject {
+        val realCIDR = ready.optString("lan_cidr")
+        val homeIP = ready.optString("client_home_ip")
+        val clientAddress = if (mode == "mapped") mappedAddress(homeIP, realCIDR, virtualCIDR) else homeIP
+        return JSONObject()
+            .put("mode", mode)
+            .put("family_lan_cidr", realCIDR)
+            .put("virtual_cidr", virtualCIDR)
+            .put("client_home_ip", homeIP)
+            .put("client_virtual_ip", clientAddress)
+            .put("devices", ready.optJSONArray("devices") ?: JSONArray())
+    }
+
+    private fun startUDPLoop(currentSocket: DatagramSocket, currentKey: ByteArray, currentSessionID: String) {
+        thread(name = "go-home-android-udp", isDaemon = true) {
+            currentSocket.soTimeout = 1_000
+            while (isRunning(currentSocket, currentSessionID)) {
+                val packet = receive(currentSocket, 1_000) ?: continue
+                try {
+                    if (packetKind(packet.bytes) != PACKET_FRAME) continue
+                    val frame = openFrame(currentKey, packet.bytes)
+                    if (frame.sessionID != currentSessionID || !acceptSequence(frame.sequence)) continue
+                    synchronized(lock) {
+                        peer = packet.source
+                        downloaded += packet.bytes.size
+                    }
+                    when (frame.type) {
+                        FRAME_READY -> Unit
+                        FRAME_PONG -> Unit
+                        FRAME_IPV4 -> writeTunPacket(frame.payload)
+                    }
+                } catch (error: Exception) {
+                    setError(error.message ?: "UDP packet rejected")
+                }
+            }
+        }
+    }
+
+    private fun startKeepaliveLoop() {
+        thread(name = "go-home-android-keepalive", isDaemon = true) {
+            while (synchronized(lock) { running }) {
+                try {
+                    Thread.sleep(10_000)
+                    sendFrame(FRAME_KEEPALIVE, "keepalive".toByteArray(Charsets.UTF_8))
+                } catch (_: InterruptedException) {
+                    return@thread
+                } catch (error: Exception) {
+                    setError(error.message ?: "keepalive failed")
+                }
+            }
+        }
+    }
+
+    private fun startTunReadLoop() {
+        thread(name = "go-home-android-vpn-read", isDaemon = true) {
+            val buffer = ByteArray(64 * 1024)
+            while (synchronized(lock) { running }) {
+                val input = synchronized(lock) { tunInput } ?: return@thread
+                val count = try {
+                    input.read(buffer)
+                } catch (_: Exception) {
+                    return@thread
+                }
+                if (count <= 0) continue
+                try {
+                    sendFrame(FRAME_IPV4, buffer.copyOf(count))
+                } catch (error: Exception) {
+                    setError(error.message ?: "VPN packet send failed")
+                }
+            }
+        }
+    }
+
+    private fun sendFrame(type: Byte, payload: ByteArray) {
+        val currentSocket: DatagramSocket
+        val currentKey: ByteArray
+        val currentSession: String
+        val currentPeer: InetSocketAddress
+        val sequence: Long
+        synchronized(lock) {
+            currentSocket = socket ?: throw IllegalStateException("UDP socket is closed")
+            currentKey = sessionKey ?: throw IllegalStateException("session key is missing")
+            currentSession = sessionID
+            currentPeer = peer ?: throw IllegalStateException("home server peer is missing")
+            sendSequence += 1
+            sequence = sendSequence
+        }
+        val packet = sealFrame(currentKey, currentSession, sequence, type, payload)
+        send(currentSocket, currentPeer, packet)
+    }
+
+    private fun writeTunPacket(packet: ByteArray) {
+        val output = synchronized(lock) { tunOutput } ?: return
+        output.write(packet)
+        output.flush()
+    }
+
+    private fun send(targetSocket: DatagramSocket, target: InetSocketAddress, payload: ByteArray) {
+        targetSocket.send(DatagramPacket(payload, payload.size, target))
+        synchronized(lock) { uploaded += payload.size }
+    }
+
+    private fun receive(targetSocket: DatagramSocket, timeoutMillis: Int): ReceivedPacket? {
+        targetSocket.soTimeout = timeoutMillis
+        val buffer = ByteArray(64 * 1024)
+        val packet = DatagramPacket(buffer, buffer.size)
+        return try {
+            targetSocket.receive(packet)
+            val source = InetSocketAddress(packet.address, packet.port)
+            ReceivedPacket(buffer.copyOf(packet.length), source)
+        } catch (_: SocketTimeoutException) {
+            null
+        }
+    }
+
+    private fun packetKind(packet: ByteArray): Byte {
+        if (packet.size < magic.size + 2 || !packet.copyOfRange(0, magic.size).contentEquals(magic)) {
+            throw IllegalArgumentException("UDP packet magic is invalid")
+        }
+        if (packet[magic.size] != VERSION) {
+            throw IllegalArgumentException("UDP packet version is unsupported")
+        }
+        return packet[magic.size + 1]
+    }
+
+    private fun controlPacket(kind: Byte, payload: JSONObject): ByteArray {
+        return magic + byteArrayOf(VERSION, kind) + payload.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    private fun sealFrame(key: ByteArray, currentSessionID: String, sequence: Long, type: Byte, payload: ByteArray): ByteArray {
+        require(currentSessionID.isNotBlank() && currentSessionID.toByteArray(Charsets.UTF_8).size <= 255)
+        val sessionBytes = currentSessionID.toByteArray(Charsets.UTF_8)
+        val header = ByteBuffer.allocate(magic.size + 2 + 1 + sessionBytes.size + Long.SIZE_BYTES)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put(magic)
+            .put(VERSION)
+            .put(PACKET_FRAME)
+            .put(sessionBytes.size.toByte())
+            .put(sessionBytes)
+            .putLong(sequence)
+            .array()
+        val nonce = ByteArray(GCM_NONCE_SIZE).also(random::nextBytes)
+        val plaintext = byteArrayOf(type) + payload
+        val ciphertext = crypt(true, key, nonce, header, plaintext)
+        return header + nonce + ciphertext
+    }
+
+    private fun openFrame(key: ByteArray, packet: ByteArray): Frame {
+        if (packetKind(packet) != PACKET_FRAME || packet.size < magic.size + 2 + 1 + Long.SIZE_BYTES + GCM_NONCE_SIZE) {
+            throw IllegalArgumentException("secure frame header is incomplete")
+        }
+        val sessionLength = packet[magic.size + 2].toInt() and 0xff
+        val headerLength = magic.size + 2 + 1 + sessionLength + Long.SIZE_BYTES
+        if (packet.size <= headerLength + GCM_NONCE_SIZE) throw IllegalArgumentException("secure frame payload is incomplete")
+        val header = packet.copyOfRange(0, headerLength)
+        val session = packet.copyOfRange(magic.size + 3, magic.size + 3 + sessionLength).toString(Charsets.UTF_8)
+        val sequence = ByteBuffer.wrap(header, headerLength - Long.SIZE_BYTES, Long.SIZE_BYTES).order(ByteOrder.BIG_ENDIAN).long
+        val nonce = packet.copyOfRange(headerLength, headerLength + GCM_NONCE_SIZE)
+        val ciphertext = packet.copyOfRange(headerLength + GCM_NONCE_SIZE, packet.size)
+        val plaintext = crypt(false, key, nonce, header, ciphertext)
+        if (plaintext.isEmpty()) throw IllegalArgumentException("secure frame body is empty")
+        return Frame(session, sequence, plaintext[0], plaintext.copyOfRange(1, plaintext.size))
+    }
+
+    private fun crypt(encrypt: Boolean, key: ByteArray, nonce: ByteArray, aad: ByteArray, input: ByteArray): ByteArray {
+        val cipher = GCMBlockCipher.newInstance(SM4Engine())
+        cipher.init(encrypt, AEADParameters(KeyParameter(key), 128, nonce, aad))
+        val output = ByteArray(cipher.getOutputSize(input.size))
+        var count = cipher.processBytes(input, 0, input.size, output, 0)
+        count += cipher.doFinal(output, count)
+        return output.copyOf(count)
+    }
+
+    private fun encryptSessionKey(publicPEM: String, sessionKey: ByteArray): ByteArray {
+        val der = publicPEM
+            .lineSequence()
+            .filterNot { it.startsWith("-----") }
+            .joinToString(separator = "")
+            .let { Base64.decode(it, Base64.DEFAULT) }
+        val publicKey = PublicKeyFactory.createKey(der)
+        val engine = SM2Engine(SM2Engine.Mode.C1C3C2)
+        engine.init(true, ParametersWithRandom(publicKey, random))
+        val cipher = engine.processBlock(sessionKey, 0, sessionKey.size)
+        if (cipher.size < 97 || cipher[0] != 0x04.toByte()) {
+            throw IllegalStateException("SM2 ciphertext is invalid")
+        }
+        val vector = ASN1EncodableVector()
+        vector.add(ASN1Integer(BigInteger(1, cipher.copyOfRange(1, 33))))
+        vector.add(ASN1Integer(BigInteger(1, cipher.copyOfRange(33, 65))))
+        vector.add(DEROctetString(cipher.copyOfRange(65, 97)))
+        vector.add(DEROctetString(cipher.copyOfRange(97, cipher.size)))
+        return DERSequence(vector).encoded
+    }
+
+    private fun mappedAddress(homeIP: String, realCIDR: String, virtualCIDR: String): String {
+        val real = IPv4Prefix.parse(realCIDR) ?: throw IllegalArgumentException("real family CIDR is invalid")
+        val virtual = IPv4Prefix.parse(virtualCIDR) ?: throw IllegalArgumentException("virtual CIDR is invalid")
+        val home = InetAddress.getByName(homeIP) as? Inet4Address ?: throw IllegalArgumentException("client home IP is invalid")
+        if (real.prefix != 24 || virtual.prefix != 24 || !real.contains(home.address)) {
+            throw IllegalArgumentException("mapped mode requires matching IPv4 /24 CIDRs")
+        }
+        val bytes = virtual.network.copyOf()
+        bytes[3] = home.address[3]
+        return InetAddress.getByAddress(bytes).hostAddress ?: throw IllegalArgumentException("virtual client IP is invalid")
+    }
+
+    private fun parseEndpoint(endpoint: String): InetSocketAddress {
+        val delimiter = endpoint.lastIndexOf(':')
+        if (delimiter <= 0) throw IllegalArgumentException("home server endpoint is invalid")
+        return InetSocketAddress(endpoint.substring(0, delimiter), endpoint.substring(delimiter + 1).toInt())
+    }
+
+    private fun virtualMAC(deviceID: String): String {
+        val bytes = byteArrayOf(0x02, 0x47, 0x48, 0, 0, 0)
+        deviceID.toByteArray(Charsets.UTF_8).forEachIndexed { index, value ->
+            bytes[3 + index % 3] = (bytes[3 + index % 3].toInt() xor value.toInt()).toByte()
+        }
+        return bytes.joinToString(separator = ":") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    private fun acceptSequence(sequence: Long): Boolean {
+        synchronized(lock) { return replay.accept(sequence) }
+    }
+
+    private fun isRunning(targetSocket: DatagramSocket, currentSessionID: String): Boolean {
+        synchronized(lock) {
+            return running && socket === targetSocket && sessionID == currentSessionID
+        }
+    }
+
+    private fun setError(message: String) {
+        synchronized(lock) { lastError = message }
+    }
+
+    private data class ReceivedPacket(val bytes: ByteArray, val source: InetSocketAddress)
+    private data class Frame(val sessionID: String, val sequence: Long, val type: Byte, val payload: ByteArray)
+
+    private class ReplayWindow {
+        private var max = 0L
+        private var seen = 0UL
+
+        fun accept(sequence: Long): Boolean {
+            if (sequence <= 0) return false
+            if (sequence > max) {
+                val shift = sequence - max
+                seen = if (shift >= 64) 1UL else (seen shl shift.toInt()) or 1UL
+                max = sequence
+                return true
+            }
+            val delta = max - sequence
+            if (delta >= 64) return false
+            val mask = 1UL shl delta.toInt()
+            if ((seen and mask) != 0UL) return false
+            seen = seen or mask
+            return true
+        }
+    }
+
+    private data class IPv4Prefix private constructor(val network: ByteArray, val prefix: Int) {
+        init {
+            require(network.size == 4 && prefix in 0..32)
+        }
+
+        fun contains(address: ByteArray): Boolean {
+            if (address.size != 4) return false
+            return masked(address, prefix).contentEquals(network)
+        }
+
+        fun overlaps(other: IPv4Prefix): Boolean {
+            val sharedPrefix = min(prefix, other.prefix)
+            return masked(network, sharedPrefix).contentEquals(masked(other.network, sharedPrefix))
+        }
+
+        companion object {
+            fun fromAddress(address: ByteArray, prefix: Int): IPv4Prefix? {
+                if (address.size != 4 || prefix !in 0..32) return null
+                return IPv4Prefix(masked(address, prefix), prefix)
+            }
+
+            fun parse(cidr: String): IPv4Prefix? {
+                val parts = cidr.split("/", limit = 2)
+                val prefix = parts.getOrNull(1)?.toIntOrNull() ?: return null
+                val address = runCatching { InetAddress.getByName(parts[0]) as? Inet4Address }.getOrNull() ?: return null
+                return fromAddress(address.address, prefix)
+            }
+
+            private fun masked(address: ByteArray, prefix: Int): ByteArray {
+                val out = address.copyOf()
+                var bits = prefix
+                for (index in out.indices) {
+                    val keep = min(bits, 8)
+                    val mask = if (keep == 0) 0 else (0xff shl (8 - keep)) and 0xff
+                    out[index] = (out[index].toInt() and mask).toByte()
+                    bits = (bits - keep).coerceAtLeast(0)
+                }
+                return out
+            }
+        }
+    }
+}

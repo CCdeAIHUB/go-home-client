@@ -19,6 +19,7 @@ class GoHomeVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
+        GoHomeTunnelRuntime.protectSocket(this)
         tunnel?.close()
         tunnel = Builder()
             .setSession("Go Home")
@@ -26,6 +27,7 @@ class GoHomeVpnService : VpnService() {
             .addAddress(virtualAddress, 32)
             .addRoute(homeAddress, homePrefix)
             .establish()
+        GoHomeTunnelRuntime.attachTunnel(tunnel)
         return START_STICKY
     }
 
@@ -33,6 +35,11 @@ class GoHomeVpnService : VpnService() {
         tunnel?.close()
         tunnel = null
         super.onDestroy()
+    }
+
+    override fun onRevoke() {
+        GoHomeTunnelRuntime.stop(null)
+        super.onRevoke()
     }
 
     companion object {

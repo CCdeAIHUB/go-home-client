@@ -38,6 +38,7 @@ const androidSignalAPI = {
     return { ok: true }
   },
   async disconnectServer() {
+    window.GoHomeNative.disconnectTunnel()
     androidState.ws?.close()
     androidState.connected = false
     return { ok: true }
@@ -49,24 +50,43 @@ const androidSignalAPI = {
     return androidRPC('client.family.list', {})
   },
   async checkNetworkConflict(family) {
-    return { conflict: false, lan_cidr: family.lan_cidr || '' }
+    const lanCIDR = family.lan_cidr || ''
+    return { conflict: lanCIDR ? window.GoHomeNative.localNetworkConflict(lanCIDR) : false, lan_cidr: lanCIDR }
   },
   async requestLayer3Permission() {
     return { status: window.GoHomeNative.requestVpnPermission() }
   },
-  async connectFamily() {
-    throw new Error('Android UDP 直连隧道正在接入原生 VPN 数据面')
+  async connectFamily(familyID, options) {
+    if (window.GoHomeNative.vpnPermissionStatus() !== 'granted') {
+      window.GoHomeNative.requestVpnPermission()
+      throw new Error('Allow Android VPN permission and connect again')
+    }
+    const prepared = readAndroidJSON(window.GoHomeNative.prepareTunnel(window.GoHomeNative.deviceId()))
+    const offer = await androidRPC('p2p.hole_punch_req', {
+      family_id: familyID,
+      client_udp_port: prepared.udp_port,
+      preferred_mode: options.mode,
+      virtual_cidr: options.virtual_cidr || '',
+      client_virtual_mac: prepared.client_virtual_mac
+    })
+    return readAndroidJSON(window.GoHomeNative.connectTunnel(
+      JSON.stringify(offer),
+      options.mode,
+      options.virtual_cidr || ''
+    ))
   },
   async getTrafficStats() {
     const heartbeat = await androidHeartbeat()
     androidState.latency = heartbeat.latency_ms || androidState.latency
-    return { up: 0, down: 0, loss: 0, latency_ms: androidState.latency, tunnel_rtt_ms: 0 }
+    return { ...readAndroidJSON(window.GoHomeNative.tunnelStats()), latency_ms: androidState.latency }
   },
   async getTunnelStatus() {
+    const tunnel = readAndroidJSON(window.GoHomeNative.tunnelStatus())
     return {
       websocket: androidState.connected ? 'connected' : 'idle',
-      udp: 'idle',
-      grace_seconds: 0
+      udp: tunnel.udp || 'idle',
+      grace_seconds: 0,
+      last_error: tunnel.last_error || ''
     }
   },
   async checkUpdate() {
@@ -190,6 +210,11 @@ function websocketURL(server) {
   if (url.protocol === 'https:') url.protocol = 'wss:'
   if (url.pathname === '/' || !url.pathname) url.pathname = '/ws'
   return url.toString()
+}
+
+function readAndroidJSON(value) {
+  if (!value) return {}
+  return JSON.parse(value)
 }
 
 async function request(path, options = {}) {

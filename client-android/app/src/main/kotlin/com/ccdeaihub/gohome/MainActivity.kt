@@ -106,6 +106,28 @@ class MainActivity : Activity() {
             }
             return "requested"
         }
+
+        @JavascriptInterface
+        fun localNetworkConflict(cidr: String): Boolean = GoHomeTunnelRuntime.localNetworkConflict(cidr)
+
+        @JavascriptInterface
+        fun prepareTunnel(deviceID: String): String = GoHomeTunnelRuntime.prepare(deviceID).toString()
+
+        @JavascriptInterface
+        fun connectTunnel(offer: String, mode: String, virtualCIDR: String): String =
+            GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+
+        @JavascriptInterface
+        fun tunnelStatus(): String = GoHomeTunnelRuntime.status().toString()
+
+        @JavascriptInterface
+        fun tunnelStats(): String = GoHomeTunnelRuntime.stats().toString()
+
+        @JavascriptInterface
+        fun disconnectTunnel(): Boolean {
+            GoHomeTunnelRuntime.stop(activity)
+            return true
+        }
     }
 
     companion object {
