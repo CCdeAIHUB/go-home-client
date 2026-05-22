@@ -2,6 +2,7 @@ package com.ccdeaihub.gohome
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.os.Bundle
 import android.webkit.JavascriptInterface
@@ -21,7 +22,8 @@ class MainActivity : Activity() {
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
 
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
+        val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        WebView.setWebContentsDebuggingEnabled(debuggable)
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.settings.allowFileAccess = false
