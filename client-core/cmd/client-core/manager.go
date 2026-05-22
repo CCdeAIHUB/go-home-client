@@ -506,6 +506,7 @@ func (m *clientManager) reconnectLoop(ctx context.Context, server, authCode stri
 	active := m.tunnel
 	m.tunnel = nil
 	m.graceUntil = time.Time{}
+	m.reconnect = nil
 	m.lastRPCError = "public server websocket reconnect grace period expired"
 	m.mu.Unlock()
 	if active != nil {
