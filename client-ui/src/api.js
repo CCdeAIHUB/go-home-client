@@ -8,38 +8,41 @@ const androidState = {
   ws: null,
   seq: 0,
   pending: new Map(),
+  server: '',
   authCode: '',
   connected: false,
-  latency: 0
+  latency: 0,
+  socketGeneration: 0,
+  intentionalClose: false,
+  graceUntil: 0,
+  reconnectTimer: null,
+  heartbeatTimer: null,
+  lastError: ''
 }
 
 const androidSignalAPI = {
   async connectServer(server, authCode) {
+    androidState.server = server
     androidState.authCode = authCode
     androidState.connected = false
-    androidState.pending.clear()
+    androidState.intentionalClose = true
+    clearAndroidTimers()
+    rejectAndroidPending('服务器信令重连中')
+    androidState.socketGeneration += 1
     androidState.ws?.close()
-    const ws = new WebSocket(websocketURL(server))
-    androidState.ws = ws
-    ws.addEventListener('message', handleAndroidMessage)
-    ws.addEventListener('close', () => {
-      androidState.connected = false
-    })
-    await waitForWebSocket(ws)
-    const timestamp = Math.floor(Date.now() / 1000)
-    await androidRPC('device.auth', {
-      device_id: window.GoHomeNative.deviceId(),
-      device_type: 'client',
-      auth_code: authCode,
-      time_key: window.GoHomeNative.timeKey(authCode, timestamp),
-      timestamp
-    })
-    androidState.connected = true
+    androidState.intentionalClose = false
+    androidState.graceUntil = 0
+    androidState.lastError = ''
+    await openAndroidSignal()
     return { ok: true }
   },
   async disconnectServer() {
+    androidState.intentionalClose = true
+    clearAndroidTimers()
+    androidState.graceUntil = 0
     window.GoHomeNative.disconnectTunnel()
     androidState.ws?.close()
+    androidState.ws = null
     androidState.connected = false
     return { ok: true }
   },
@@ -76,17 +79,20 @@ const androidSignalAPI = {
     ))
   },
   async getTrafficStats() {
-    const heartbeat = await androidHeartbeat()
-    androidState.latency = heartbeat.latency_ms || androidState.latency
+    if (androidState.connected) {
+      const heartbeat = await androidHeartbeat().catch(() => null)
+      androidState.latency = heartbeat?.latency_ms || androidState.latency
+    }
     return { ...readAndroidJSON(window.GoHomeNative.tunnelStats()), latency_ms: androidState.latency }
   },
   async getTunnelStatus() {
     const tunnel = readAndroidJSON(window.GoHomeNative.tunnelStatus())
+    const graceSeconds = androidGraceSeconds()
     return {
-      websocket: androidState.connected ? 'connected' : 'idle',
+      websocket: androidState.connected ? 'connected' : graceSeconds ? 'grace' : 'idle',
       udp: tunnel.udp || 'idle',
-      grace_seconds: 0,
-      last_error: tunnel.last_error || ''
+      grace_seconds: graceSeconds,
+      last_error: tunnel.last_error || androidState.lastError || ''
     }
   },
   async checkUpdate() {
@@ -155,6 +161,30 @@ function waitForWebSocket(ws) {
   })
 }
 
+async function openAndroidSignal() {
+  const ws = new WebSocket(websocketURL(androidState.server))
+  const generation = ++androidState.socketGeneration
+  androidState.ws = ws
+  ws.addEventListener('message', handleAndroidMessage)
+  ws.addEventListener('close', () => handleAndroidClose(generation))
+  await waitForWebSocket(ws)
+  const timestamp = Math.floor(Date.now() / 1000)
+  await androidRPC('device.auth', {
+    device_id: window.GoHomeNative.deviceId(),
+    device_type: 'client',
+    auth_code: androidState.authCode,
+    time_key: window.GoHomeNative.timeKey(androidState.authCode, timestamp),
+    timestamp
+  })
+  if (androidState.ws !== ws) {
+    throw new Error('服务器信令已切换')
+  }
+  androidState.connected = true
+  androidState.graceUntil = 0
+  androidState.lastError = ''
+  startAndroidHeartbeat()
+}
+
 function androidRPC(action, params) {
   if (!androidState.ws || androidState.ws.readyState !== WebSocket.OPEN) {
     return Promise.reject(new Error('服务器信令未连接'))
@@ -190,6 +220,8 @@ function handleAndroidMessage(event) {
     androidRPC('stats.latency_pong', { probe_id: env.params?.probe_id }).catch(() => {})
   }
   if (env.action === 'device.force_offline') {
+    androidState.intentionalClose = true
+    clearAndroidTimers()
     window.GoHomeNative.disconnectTunnel()
     androidState.ws?.close()
   }
@@ -201,6 +233,72 @@ function androidHeartbeat() {
     time_key: window.GoHomeNative.timeKey(androidState.authCode, timestamp),
     timestamp
   })
+}
+
+function handleAndroidClose(generation) {
+  if (generation !== androidState.socketGeneration) return
+  androidState.connected = false
+  stopAndroidHeartbeat()
+  rejectAndroidPending('服务器信令已断开')
+  if (androidState.intentionalClose) return
+  const tunnel = readAndroidJSON(window.GoHomeNative.tunnelStatus())
+  if (tunnel.udp === 'connected') beginAndroidGrace()
+}
+
+function beginAndroidGrace() {
+  if (!androidState.graceUntil) {
+    androidState.graceUntil = Date.now() + 30000
+  }
+  scheduleAndroidReconnect(800)
+}
+
+function scheduleAndroidReconnect(delay) {
+  window.clearTimeout(androidState.reconnectTimer)
+  androidState.reconnectTimer = window.setTimeout(async () => {
+    if (androidState.intentionalClose) return
+    if (androidGraceSeconds() === 0) {
+      androidState.lastError = 'WebSocket grace period expired'
+      window.GoHomeNative.disconnectTunnel()
+      return
+    }
+    try {
+      await openAndroidSignal()
+    } catch (_) {
+      scheduleAndroidReconnect(1800)
+    }
+  }, delay)
+}
+
+function startAndroidHeartbeat() {
+  stopAndroidHeartbeat()
+  androidState.heartbeatTimer = window.setInterval(() => {
+    androidHeartbeat().then((heartbeat) => {
+      androidState.latency = heartbeat?.latency_ms || androidState.latency
+    }).catch(() => {})
+  }, 25000)
+}
+
+function stopAndroidHeartbeat() {
+  window.clearInterval(androidState.heartbeatTimer)
+  androidState.heartbeatTimer = null
+}
+
+function clearAndroidTimers() {
+  window.clearTimeout(androidState.reconnectTimer)
+  androidState.reconnectTimer = null
+  stopAndroidHeartbeat()
+}
+
+function rejectAndroidPending(message) {
+  for (const pending of androidState.pending.values()) {
+    pending({ error: { message } })
+  }
+  androidState.pending.clear()
+}
+
+function androidGraceSeconds() {
+  if (!androidState.graceUntil) return 0
+  return Math.max(0, Math.ceil((androidState.graceUntil - Date.now()) / 1000))
 }
 
 function websocketURL(server) {
