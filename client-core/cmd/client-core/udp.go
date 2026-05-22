@@ -25,6 +25,7 @@ type punchClient struct {
 	mu      sync.Mutex
 	peer    net.Addr
 	sendSeq uint64
+	replay  tunnel.ReplayWindow
 	ready   chan tunnel.Ready
 	pong    chan []byte
 	packets chan []byte
@@ -204,6 +205,9 @@ func (c *punchClient) handlePacket(packet []byte, addr net.Addr) error {
 		}
 		if frame.SessionID != c.offer.SessionID {
 			return fmt.Errorf("frame belongs to session %s", frame.SessionID)
+		}
+		if !c.replay.Accept(frame.Sequence) {
+			return fmt.Errorf("secure frame sequence %d was already seen", frame.Sequence)
 		}
 		c.setPeer(addr)
 		switch frame.Type {
