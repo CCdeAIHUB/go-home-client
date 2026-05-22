@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-func runControl(addr, uiDir string, udpPort int, identityFile string) error {
+func runControl(addr, uiDir string, udpPort int, identityFile, updateManifest, updateComponent string) error {
 	manager, err := newClientManager(identityFile, udpPort)
 	if err != nil {
 		return err
@@ -101,8 +101,12 @@ func runControl(addr, uiDir string, udpPort int, identityFile string) error {
 		writeJSON(w, map[string]bool{"ok": true})
 		return nil
 	}))
-	mux.HandleFunc("/api/update", method(http.MethodGet, func(w http.ResponseWriter, _ *http.Request) error {
-		writeJSON(w, map[string]any{"current": "0.2.0", "latest": "0.2.0", "update": false})
+	mux.HandleFunc("/api/update", method(http.MethodGet, func(w http.ResponseWriter, r *http.Request) error {
+		update, err := checkUpdate(r.Context(), currentClientVersion, updateManifest, updateComponent)
+		if err != nil {
+			return err
+		}
+		writeJSON(w, update)
 		return nil
 	}))
 

@@ -104,7 +104,12 @@ async function disconnect() {
 }
 
 async function checkUpdate() {
-  state.update = await backend.checkUpdate()
+  state.error = ''
+  try {
+    state.update = await backend.checkUpdate()
+  } catch (error) {
+    state.error = error.message
+  }
 }
 
 function formatBytes(value) {
@@ -303,8 +308,9 @@ function formatBytes(value) {
           检查更新
         </button>
         <p v-if="state.update">
-          {{ state.update.update ? `发现新版本 ${state.update.latest}` : '当前已是最新版本' }}
+          {{ !state.update.configured ? '未配置远程版本清单' : state.update.update ? `发现新版本 ${state.update.latest}` : '当前已是最新版本' }}
         </p>
+        <p v-if="state.error" class="error-text">{{ state.error }}</p>
       </div>
     </section>
   </main>

@@ -34,10 +34,12 @@ func main() {
 	once := flag.Bool("once", false, "exit after direct UDP handshake and encrypted ping verification")
 	controlAddr := flag.String("control-addr", "", "local HTTP control address for UI shells")
 	uiDir := flag.String("ui-dir", "", "built client UI directory served by the local control address")
+	updateManifest := flag.String("update-manifest", os.Getenv("GO_HOME_UPDATE_MANIFEST_URL"), "CDN version manifest URL")
+	updateComponent := flag.String("update-component", "client-pc", "component key inside the CDN version manifest")
 	flag.Parse()
 
 	if *controlAddr != "" {
-		if err := runControl(*controlAddr, *uiDir, *udpPort, *identityFile); err != nil {
+		if err := runControl(*controlAddr, *uiDir, *udpPort, *identityFile, *updateManifest, *updateComponent); err != nil {
 			log.Fatal(err)
 		}
 		return
