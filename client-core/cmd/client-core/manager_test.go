@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"gohome/shared/protocol"
 )
 
 func TestGraceSecondsRoundsUp(t *testing.T) {
@@ -21,5 +23,12 @@ func TestCounterDeltaHandlesReset(t *testing.T) {
 	}
 	if got := counterDelta(4, 40); got != 4 {
 		t.Fatalf("reset counter delta got %d want 4", got)
+	}
+}
+
+func TestFamilyCIDRUsesCachedFamilies(t *testing.T) {
+	manager := &clientManager{families: []protocol.Family{{ID: 7, LANCIDR: "192.168.3.0/24"}}}
+	if got := manager.familyCIDR(7); got != "192.168.3.0/24" {
+		t.Fatalf("family CIDR got %q", got)
 	}
 }

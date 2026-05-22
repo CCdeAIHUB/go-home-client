@@ -211,6 +211,15 @@ func (m *clientManager) ConnectFamily(ctx context.Context, familyID int64, optio
 	if mode == "mapped" && options.VirtualCIDR == "" {
 		return tunnelView{}, errors.New("virtual CIDR is required for mapped mode")
 	}
+	if mode == "mapped" {
+		if err := rejectCIDRConflict("virtual CIDR", options.VirtualCIDR); err != nil {
+			return tunnelView{}, err
+		}
+	} else if cidr := m.familyCIDR(familyID); cidr != "" {
+		if err := rejectCIDRConflict("family LAN CIDR", cidr); err != nil {
+			return tunnelView{}, err
+		}
+	}
 	if options.ClientVirtualMAC == "" {
 		options.ClientVirtualMAC = virtualMAC(m.deviceID)
 	}
@@ -220,6 +229,11 @@ func (m *clientManager) ConnectFamily(ctx context.Context, familyID int64, optio
 	if err != nil {
 		m.setRPCError(err)
 		return tunnelView{}, err
+	}
+	if mode == "real" {
+		if err := rejectCIDRConflict("family LAN CIDR", offer.Server.LANCIDR); err != nil {
+			return tunnelView{}, err
+		}
 	}
 	client, err := newPunchClient(m.udp, m.deviceID, offer)
 	if err != nil {
@@ -364,6 +378,28 @@ func (m *clientManager) setRPCError(err error) {
 	m.mu.Lock()
 	m.lastRPCError = err.Error()
 	m.mu.Unlock()
+}
+
+func (m *clientManager) familyCIDR(familyID int64) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, family := range m.families {
+		if family.ID == familyID {
+			return family.LANCIDR
+		}
+	}
+	return ""
+}
+
+func rejectCIDRConflict(label, cidr string) error {
+	conflict, err := CheckNetworkConflict(cidr)
+	if err != nil {
+		return err
+	}
+	if conflict.Conflict {
+		return fmt.Errorf("%s %s overlaps local network: %s", label, cidr, strings.Join(conflict.Overlaps, ", "))
+	}
+	return nil
 }
 
 func (m *clientManager) watchRPC(rpc *rpcClient) {
