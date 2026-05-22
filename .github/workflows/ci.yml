@@ -50,6 +50,11 @@ jobs:
         run: |
           GOOS=windows GOARCH=amd64 go build -o ../artifacts/windows/go-home-client-core.exe ./cmd/client-core
         working-directory: client-core
+      - name: Add Wintun runtime
+        run: |
+          curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51  wintun.zip" | sha256sum -c -
+          unzip -j wintun.zip wintun/bin/amd64/wintun.dll -d artifacts/windows
       - name: Publish Windows win-x64 shell
         run: |
           dotnet publish client-pc/GoHome.Pc.csproj \
