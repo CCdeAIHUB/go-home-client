@@ -46,6 +46,7 @@ type managedTunnel struct {
 	link      *virtualLink
 	cancel    context.CancelFunc
 	connected time.Time
+	reported  punchStats
 }
 
 type tunnelOptions struct {
@@ -464,7 +465,68 @@ func (m *clientManager) heartbeatLoop(rpc *rpcClient) {
 			_ = rpc.Close()
 			return
 		}
+		if err := m.reportTraffic(rpc); err != nil {
+			_ = rpc.Close()
+			return
+		}
 	}
+}
+
+func (m *clientManager) reportTraffic(rpc *rpcClient) error {
+	active, stats, upDelta, downDelta := m.pendingTraffic()
+	for _, report := range []struct {
+		direction string
+		bytes     uint64
+	}{
+		{direction: "up", bytes: upDelta},
+		{direction: "down", bytes: downDelta},
+	} {
+		if report.bytes == 0 {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		_, err := rpc.Call(ctx, protocol.ActionStatsTraffic, protocol.TrafficReportParams{
+			Direction: report.direction,
+			Bytes:     int64(report.bytes),
+		})
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	m.markTrafficReported(active, stats)
+	return nil
+}
+
+func (m *clientManager) pendingTraffic() (*managedTunnel, punchStats, uint64, uint64) {
+	m.mu.RLock()
+	active := m.tunnel
+	previous := punchStats{}
+	if active != nil {
+		previous = active.reported
+	}
+	m.mu.RUnlock()
+	if active == nil {
+		return nil, punchStats{}, 0, 0
+	}
+	stats := active.client.Stats()
+	return active, stats, counterDelta(stats.Up, previous.Up), counterDelta(stats.Down, previous.Down)
+}
+
+func (m *clientManager) markTrafficReported(active *managedTunnel, stats punchStats) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if active != nil && m.tunnel == active {
+		active.reported.Up = stats.Up
+		active.reported.Down = stats.Down
+	}
+}
+
+func counterDelta(current, previous uint64) uint64 {
+	if current < previous {
+		return current
+	}
+	return current - previous
 }
 
 func graceSeconds(deadline, now time.Time) int {
