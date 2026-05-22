@@ -27,4 +27,5 @@ kotlin {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.16.0")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.83")
 }

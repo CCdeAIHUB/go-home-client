@@ -1,6 +1,77 @@
 export function api() {
   if (window.GoHomeAPI) return window.GoHomeAPI
+  if (window.GoHomeNative) return androidSignalAPI
   return controlAPI
+}
+
+const androidState = {
+  ws: null,
+  seq: 0,
+  pending: new Map(),
+  authCode: '',
+  connected: false,
+  latency: 0
+}
+
+const androidSignalAPI = {
+  async connectServer(server, authCode) {
+    androidState.authCode = authCode
+    androidState.connected = false
+    androidState.pending.clear()
+    androidState.ws?.close()
+    const ws = new WebSocket(websocketURL(server))
+    androidState.ws = ws
+    ws.addEventListener('message', handleAndroidMessage)
+    ws.addEventListener('close', () => {
+      androidState.connected = false
+    })
+    await waitForWebSocket(ws)
+    const timestamp = Math.floor(Date.now() / 1000)
+    await androidRPC('device.auth', {
+      device_id: window.GoHomeNative.deviceId(),
+      device_type: 'client',
+      auth_code: authCode,
+      time_key: window.GoHomeNative.timeKey(authCode, timestamp),
+      timestamp
+    })
+    androidState.connected = true
+    return { ok: true }
+  },
+  async disconnectServer() {
+    androidState.ws?.close()
+    androidState.connected = false
+    return { ok: true }
+  },
+  async getConnectionStatus() {
+    return this.getTunnelStatus()
+  },
+  async listFamilies() {
+    return androidRPC('client.family.list', {})
+  },
+  async checkNetworkConflict(family) {
+    return { conflict: false, lan_cidr: family.lan_cidr || '' }
+  },
+  async requestLayer3Permission() {
+    return { status: window.GoHomeNative.requestVpnPermission() }
+  },
+  async connectFamily() {
+    throw new Error('Android UDP 直连隧道正在接入原生 VPN 数据面')
+  },
+  async getTrafficStats() {
+    const heartbeat = await androidHeartbeat()
+    androidState.latency = heartbeat.latency_ms || androidState.latency
+    return { up: 0, down: 0, loss: 0, latency_ms: androidState.latency, tunnel_rtt_ms: 0 }
+  },
+  async getTunnelStatus() {
+    return {
+      websocket: androidState.connected ? 'connected' : 'idle',
+      udp: 'idle',
+      grace_seconds: 0
+    }
+  },
+  async checkUpdate() {
+    return { current: '0.2.0', latest: '0.2.0', update: false, configured: false }
+  }
 }
 
 const controlAPI = {
@@ -48,6 +119,77 @@ const controlAPI = {
   async checkUpdate() {
     return request('/api/update')
   }
+}
+
+function waitForWebSocket(ws) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error('服务器连接超时')), 12000)
+    ws.addEventListener('open', () => {
+      window.clearTimeout(timer)
+      resolve()
+    }, { once: true })
+    ws.addEventListener('error', () => {
+      window.clearTimeout(timer)
+      reject(new Error('服务器无法连接'))
+    }, { once: true })
+  })
+}
+
+function androidRPC(action, params) {
+  if (!androidState.ws || androidState.ws.readyState !== WebSocket.OPEN) {
+    return Promise.reject(new Error('服务器信令未连接'))
+  }
+  const id = `android-${++androidState.seq}`
+  const reply = new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      androidState.pending.delete(id)
+      reject(new Error('服务器响应超时'))
+    }, 12000)
+    androidState.pending.set(id, (env) => {
+      window.clearTimeout(timer)
+      if (env.error) {
+        reject(new Error(env.error.message || env.error.code))
+      } else {
+        resolve(env.result)
+      }
+    })
+  })
+  androidState.ws.send(JSON.stringify({ jsonrpc: '2.0', id, action, params }))
+  return reply
+}
+
+function handleAndroidMessage(event) {
+  const env = JSON.parse(event.data)
+  if (env.id && androidState.pending.has(env.id)) {
+    const pending = androidState.pending.get(env.id)
+    androidState.pending.delete(env.id)
+    pending(env)
+    return
+  }
+  if (env.action === 'device.latency_probe') {
+    androidRPC('stats.latency_pong', { probe_id: env.params?.probe_id }).catch(() => {})
+  }
+  if (env.action === 'device.force_offline') {
+    androidState.ws?.close()
+  }
+}
+
+function androidHeartbeat() {
+  const timestamp = Math.floor(Date.now() / 1000)
+  return androidRPC('ping', {
+    time_key: window.GoHomeNative.timeKey(androidState.authCode, timestamp),
+    timestamp
+  })
+}
+
+function websocketURL(server) {
+  let value = server.trim()
+  if (!value.includes('://')) value = `ws://${value}`
+  const url = new URL(value)
+  if (url.protocol === 'http:') url.protocol = 'ws:'
+  if (url.protocol === 'https:') url.protocol = 'wss:'
+  if (url.pathname === '/' || !url.pathname) url.pathname = '/ws'
+  return url.toString()
 }
 
 async function request(path, options = {}) {

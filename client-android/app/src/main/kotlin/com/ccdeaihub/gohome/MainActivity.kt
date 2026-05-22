@@ -2,6 +2,7 @@ package com.ccdeaihub.gohome
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.net.VpnService
@@ -12,6 +13,10 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
+import org.bouncycastle.crypto.digests.SM3Digest
+import org.bouncycastle.crypto.macs.HMac
+import org.bouncycastle.crypto.params.KeyParameter
+import java.util.UUID
 
 class MainActivity : Activity() {
     private var vpnPermissionGranted = false
@@ -65,6 +70,25 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun status(): String = "native-shell-ready"
+
+        @JavascriptInterface
+        fun deviceId(): String {
+            val prefs = activity.getSharedPreferences("go-home", Context.MODE_PRIVATE)
+            return prefs.getString("device_id", null) ?: "client-android-${UUID.randomUUID()}".also {
+                prefs.edit().putString("device_id", it).apply()
+            }
+        }
+
+        @JavascriptInterface
+        fun timeKey(secret: String, timestampSeconds: Long): String {
+            val mac = HMac(SM3Digest())
+            mac.init(KeyParameter(secret.toByteArray(Charsets.UTF_8)))
+            val window = (timestampSeconds / 30L).toString().toByteArray(Charsets.UTF_8)
+            mac.update(window, 0, window.size)
+            val digest = ByteArray(mac.macSize)
+            mac.doFinal(digest, 0)
+            return digest.joinToString(separator = "") { "%02x".format(it) }
+        }
 
         @JavascriptInterface
         fun vpnPermissionStatus(): String =
