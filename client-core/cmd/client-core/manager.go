@@ -132,7 +132,7 @@ func (m *clientManager) dialAndAuth(ctx context.Context, server, authCode string
 		return nil, err
 	}
 	rpc.HandleEvents(func(env protocol.Envelope) {
-		answerLatencyProbe(rpc, env)
+		m.handleRPCEvent(rpc, env)
 	})
 
 	now := time.Now()
@@ -378,6 +378,43 @@ func (m *clientManager) setRPCError(err error) {
 	m.mu.Lock()
 	m.lastRPCError = err.Error()
 	m.mu.Unlock()
+}
+
+func (m *clientManager) handleRPCEvent(rpc *rpcClient, env protocol.Envelope) {
+	answerLatencyProbe(rpc, env)
+	if env.Action != protocol.EventFamilyLANChanged {
+		return
+	}
+	var params struct {
+		FamilyID int64  `json:"family_id"`
+		LANCIDR  string `json:"lan_cidr"`
+	}
+	if err := json.Unmarshal(env.Params, &params); err != nil {
+		m.setRPCError(err)
+		return
+	}
+	m.applyLANChange(params.FamilyID, params.LANCIDR)
+}
+
+func (m *clientManager) applyLANChange(familyID int64, cidr string) {
+	m.mu.Lock()
+	for i := range m.families {
+		if m.families[i].ID == familyID {
+			m.families[i].LANCIDR = cidr
+		}
+	}
+	active := m.tunnel
+	if active == nil || active.offer.FamilyID != familyID {
+		m.mu.Unlock()
+		return
+	}
+	m.tunnel = nil
+	m.lastRPCError = "family LAN changed; reconnect tunnel"
+	m.mu.Unlock()
+	if active.link != nil {
+		_ = active.link.Close()
+	}
+	active.cancel()
 }
 
 func (m *clientManager) familyCIDR(familyID int64) string {

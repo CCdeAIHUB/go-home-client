@@ -32,3 +32,11 @@ func TestFamilyCIDRUsesCachedFamilies(t *testing.T) {
 		t.Fatalf("family CIDR got %q", got)
 	}
 }
+
+func TestApplyLANChangeRefreshesCachedFamily(t *testing.T) {
+	manager := &clientManager{families: []protocol.Family{{ID: 7, LANCIDR: "192.168.3.0/24"}}}
+	manager.applyLANChange(7, "192.168.8.0/24")
+	if got := manager.familyCIDR(7); got != "192.168.8.0/24" {
+		t.Fatalf("changed family CIDR got %q", got)
+	}
+}

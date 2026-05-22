@@ -291,6 +291,7 @@ function formatBytes(value) {
         <PlugZap :size="18" />
         断开连接
       </button>
+      <p v-if="state.status.last_error" class="error-text">{{ state.status.last_error }}</p>
     </section>
 
     <section v-if="state.page === 'settings'" class="content split">
