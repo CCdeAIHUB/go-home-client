@@ -15,17 +15,14 @@ import kotlin.concurrent.thread
 
 /**
  * Native WebSocket signalling client for Android.
- * Uses OkHttp WebSocket — the standard for Android WebSocket communication.
- *
- * Architecture: all network I/O is handled by the native Kotlin shell;
- * the WebView/JS UI layer is display-only and communicates via GoHomeBridge.
+ * All network I/O is handled by the native Kotlin shell;
+ * the WebView/JS UI layer is display-only.
  */
 object GoHomeSignalClient {
     private const val TAG = "GoHomeSignal"
-    private const val RPC_TIMEOUT_MS = 12_000L
-    private const val HEARTBEAT_INTERVAL_MS = 25_000L
-    private const val RECONNECT_DELAY_MS = 1_800L
-    private const val GRACE_DURATION_MS = 30_000L
+    private const val RPC_TIMEOUT_S = 12L
+    private const val HEARTBEAT_MS = 25_000L
+    private const val RECONNECT_MS = 1_800L
 
     private val httpClient = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -40,75 +37,130 @@ object GoHomeSignalClient {
     private var connected = false
     private var intentionalClose = false
     private var lastError = ""
-    private var latency = 0L
-    private var graceUntil = 0L
     private var socketGeneration = 0
 
     private val seq = AtomicInteger(0)
-    private val pending = ConcurrentHashMap<String, (SignalResult<JSONObject>) -> Unit>()
+    private val pending = ConcurrentHashMap<String, (ok: Boolean, data: String) -> Unit>()
     private var heartbeatThread: Thread? = null
-    private var reconnectThread: Thread? = null
 
-    private var callback: SignalCallback? = null
-
-    interface SignalCallback {
-        fun onConnected()
-        fun onDisconnected(graceSeconds: Int, lastError: String)
-        fun onPush(action: String, params: String)
-    }
-
-    fun setCallback(cb: SignalCallback?) {
-        synchronized(lock) { callback = cb }
-    }
-
-    // ── Public API (called from GoHomeBridge @JavascriptInterface) ──────
+    // ── Public API ──
 
     fun connect(server: String, authCode: String, deviceId: String): String {
         synchronized(lock) {
             this.intentionalClose = true
-            stopInternal()
+            closeInternal()
             this.server = server
             this.authCode = authCode
             this.deviceId = deviceId
             this.intentionalClose = false
             this.lastError = ""
-            this.graceUntil = 0
             this.socketGeneration += 1
         }
+        val gen = synchronized(lock) { socketGeneration }
         val latch = CountDownLatch(1)
-        val resultHolder = arrayOf<String?>("")
-        val generation = synchronized(lock) { socketGeneration }
+        val out = arrayOf("")
 
+        doConnect(gen, latch, out)
+
+        try {
+            if (!latch.await(15, TimeUnit.SECONDS)) {
+                synchronized(lock) { lastError = "connection timeout" }
+                return """{"error":"connection timeout"}"""
+            }
+        } catch (_: InterruptedException) {
+            return """{"error":"interrupted"}"""
+        }
+        return out[0]
+    }
+
+    fun disconnect(): String {
+        synchronized(lock) {
+            intentionalClose = true
+            closeInternal()
+        }
+        return """{"ok":true}"""
+    }
+
+    fun rpc(action: String, paramsJSON: String): String {
+        val id = "a-${seq.incrementAndGet()}"
+        val envelope = JSONObject()
+            .put("jsonrpc", "2.0")
+            .put("id", id)
+            .put("action", action)
+            .put("params", JSONObject(paramsJSON))
+
+        val currentWs: WebSocket?
+        synchronized(lock) { currentWs = ws }
+
+        if (currentWs == null) return """{"error":"not connected"}"""
+
+        val latch = CountDownLatch(1)
+        val out = arrayOf("""{"error":"timeout"}""")
+
+        pending[id] = { ok, data ->
+            out[0] = if (ok) data else """{"error":${JSONObject.quote(data)}}"""
+            latch.countDown()
+        }
+
+        if (!currentWs.send(envelope.toString())) {
+            pending.remove(id)
+            return """{"error":"send failed"}"""
+        }
+
+        try {
+            latch.await(RPC_TIMEOUT_S, TimeUnit.SECONDS)
+        } catch (_: InterruptedException) {
+            pending.remove(id)
+        }
+        return out[0]
+    }
+
+    fun getStatus(): String {
+        val st: String
+        synchronized(lock) {
+            st = if (connected) "connected" else "idle"
+        }
+        val tunnel = GoHomeTunnelRuntime.status()
+        return JSONObject()
+            .put("websocket", st)
+            .put("udp", tunnel.optString("udp", "idle"))
+            .put("grace_seconds", 0)
+            .put("last_error", synchronized(lock) { lastError })
+            .toString()
+    }
+
+    // ── Internal ──
+
+    private fun doConnect(gen: Int, latch: CountDownLatch, out: Array<String>) {
         val wsURL = buildWSURL(server)
         val request = Request.Builder().url(wsURL).build()
+        val currentAuth = authCode
+        val currentDev = deviceId
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                // Authenticate immediately
-                val timestamp = System.currentTimeMillis() / 1000
-                val timeKey = computeTimeKey(authCode, timestamp)
+                val ts = System.currentTimeMillis() / 1000
+                val tk = computeTimeKey(currentAuth, ts)
                 val authMsg = JSONObject()
                     .put("jsonrpc", "2.0")
                     .put("id", "auth-${seq.incrementAndGet()}")
                     .put("action", "device.auth")
                     .put("params", JSONObject()
-                        .put("device_id", deviceId)
+                        .put("device_id", currentDev)
                         .put("device_type", "client")
-                        .put("auth_code", authCode)
-                        .put("time_key", timeKey)
-                        .put("timestamp", timestamp))
+                        .put("auth_code", currentAuth)
+                        .put("time_key", tk)
+                        .put("timestamp", ts))
                 webSocket.send(authMsg.toString())
 
                 synchronized(lock) {
-                    if (socketGeneration != generation) return
+                    if (socketGeneration != gen) { webSocket.close(1000, "stale"); return }
                     connected = true
-                    graceUntil = 0
                     lastError = ""
                 }
-                startHeartbeat(generation)
-                resultHolder[0] = JSONObject().put("ok", true).toString()
+                startHeartbeat(gen)
+                out[0] = """{"ok":true}"""
                 latch.countDown()
-                callback?.onConnected()
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -120,7 +172,7 @@ object GoHomeSignalClient {
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                handleClose(generation)
+                handleDisconnect(gen)
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -128,172 +180,55 @@ object GoHomeSignalClient {
                     lastError = t.message ?: "websocket error"
                     connected = false
                     stopHeartbeat()
-                    rejectAllPending(lastError)
+                    failAllPending(lastError)
                 }
-                resultHolder[0] = JSONObject().put("error", lastError).toString()
+                out[0] = """{"error":${JSONObject.quote(lastError)}}"""
                 latch.countDown()
-
-                val err: String
-                synchronized(lock) { err = lastError }
-                callback?.onDisconnected(0, err)
-
                 if (!synchronized(lock) { intentionalClose }) {
-                    scheduleReconnect(generation)
+                    scheduleReconnect(gen)
                 }
             }
         }
 
         val newWs = httpClient.newWebSocket(request, listener)
         synchronized(lock) { ws = newWs }
-
-        return try {
-            if (!latch.await(15, TimeUnit.SECONDS)) {
-                synchronized(lock) { lastError = "connection timeout" }
-                JSONObject().put("error", "connection timeout").toString()
-            } else {
-                resultHolder[0] ?: JSONObject().put("error", "unknown error").toString()
-            }
-        } catch (e: InterruptedException) {
-            JSONObject().put("error", "interrupted").toString()
-        }
-    }
-
-    fun disconnect(): String {
-        synchronized(lock) {
-            intentionalClose = true
-            stopInternal()
-        }
-        return JSONObject().put("ok", true).toString()
-    }
-
-    fun rpc(action: String, paramsJSON: String): String {
-        val id = "android-${seq.incrementAndGet()}"
-        val envelope = JSONObject()
-            .put("jsonrpc", "2.0")
-            .put("id", id)
-            .put("action", action)
-            .put("params", JSONObject(paramsJSON))
-
-        val currentWs: WebSocket?
-        synchronized(lock) { currentWs = ws }
-
-        if (currentWs == null) {
-            return JSONObject().put("error", "not connected").toString()
-        }
-
-        val result = arrayOf<SignalResult<JSONObject>?>(null)
-        val latch = CountDownLatch(1)
-
-        pending[id] = { res ->
-            result[0] = res
-            latch.countDown()
-        }
-
-        if (!currentWs.send(envelope.toString())) {
-            pending.remove(id)
-            return JSONObject().put("error", "send failed").toString()
-        }
-
-        return try {
-            if (!latch.await(RPC_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                pending.remove(id)
-                JSONObject().put("error", "server response timeout").toString()
-            } else {
-                when (val res = result[0]) {
-                    is SignalResult.Success -> res.value.toString()
-                    is SignalResult.Failure -> JSONObject().put("error", res.exception.message ?: "rpc failed").toString()
-                    else -> JSONObject().put("error", "unexpected result").toString()
-                }
-            }
-        } catch (e: InterruptedException) {
-            pending.remove(id)
-            JSONObject().put("error", "rpc interrupted").toString()
-        }
-    }
-
-    fun getStatus(): String {
-        val graceSeconds = graceSecondsRemaining()
-        val wsStatus: String
-        synchronized(lock) {
-            wsStatus = if (connected) "connected" else if (graceSeconds > 0) "grace" else "idle"
-        }
-        val tunnel = GoHomeTunnelRuntime.status()
-        return JSONObject()
-            .put("websocket", wsStatus)
-            .put("udp", tunnel.optString("udp", "idle"))
-            .put("grace_seconds", graceSeconds)
-            .put("last_error", synchronized(lock) { lastError })
-            .toString()
-    }
-
-    fun isConnected(): Boolean {
-        synchronized(lock) { return connected }
-    }
-
-    fun getLatency(): Long {
-        synchronized(lock) { return latency }
-    }
-
-    // ── Internal ──────────────────────────────────────────
-
-    private fun handleClose(generation: Int) {
-        synchronized(lock) {
-            if (socketGeneration != generation) return
-            connected = false
-            stopHeartbeat()
-            rejectAllPending("server signal disconnected")
-        }
-        val graceSec = graceSecondsRemaining()
-        val err: String
-        synchronized(lock) { err = lastError }
-        callback?.onDisconnected(graceSec, err)
-
-        if (!synchronized(lock) { intentionalClose }) {
-            val tunnel = GoHomeTunnelRuntime.status()
-            if (tunnel.optString("udp") == "connected" && graceSecondsRemaining() > 0) {
-                scheduleReconnect(generation)
-            }
-        }
     }
 
     private fun handleMessage(text: String) {
         try {
             val env = JSONObject(text)
 
-            // RPC response
             if (env.has("id")) {
                 val id = env.getString("id")
                 val handler = pending.remove(id) ?: return
                 if (env.has("error")) {
-                    val errMsg = env.optJSONObject("error")?.optString("message")
+                    val msg = env.optJSONObject("error")?.optString("message")
                         ?: env.optJSONObject("error")?.optString("code")
                         ?: "unknown error"
-                    handler(SignalResult.failure(Exception(errMsg)))
+                    handler(false, msg)
                 } else {
-                    handler(SignalResult.success(env.optJSONObject("result") ?: JSONObject()))
+                    val result = env.optJSONObject("result") ?: JSONObject()
+                    handler(true, result.toString())
                 }
                 return
             }
 
-            // Server push
             val action = env.optString("action", "")
             if (action == "device.latency_probe") {
                 val probeId = env.optJSONObject("params")?.optString("probe_id") ?: ""
                 rpcInternal("stats.latency_pong", JSONObject().put("probe_id", probeId))
             } else if (action == "device.force_offline") {
                 synchronized(lock) { intentionalClose = true }
-                stopInternal()
+                closeInternal()
                 GoHomeTunnelRuntime.stop(null)
-            } else if (action.isNotEmpty()) {
-                callback?.onPush(action, env.optJSONObject("params")?.toString() ?: "{}")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to handle message", e)
+            Log.w(TAG, "handleMessage error", e)
         }
     }
 
     private fun rpcInternal(action: String, params: JSONObject) {
-        val id = "android-internal-${seq.incrementAndGet()}"
+        val id = "i-${seq.incrementAndGet()}"
         val envelope = JSONObject()
             .put("jsonrpc", "2.0")
             .put("id", id)
@@ -302,23 +237,30 @@ object GoHomeSignalClient {
         synchronized(lock) { ws?.send(envelope.toString()) }
     }
 
-    private fun startHeartbeat(generation: Int) {
+    private fun handleDisconnect(gen: Int) {
+        synchronized(lock) {
+            if (socketGeneration != gen) return
+            connected = false
+            stopHeartbeat()
+            failAllPending("disconnected")
+        }
+        if (!synchronized(lock) { intentionalClose }) {
+            scheduleReconnect(gen)
+        }
+    }
+
+    private fun startHeartbeat(gen: Int) {
         stopHeartbeat()
-        heartbeatThread = thread(name = "go-home-heartbeat", isDaemon = true) {
+        heartbeatThread = thread(name = "go-home-hb", isDaemon = true) {
             while (!Thread.interrupted()) {
                 try {
-                    Thread.sleep(HEARTBEAT_INTERVAL_MS)
-                    if (synchronized(lock) { socketGeneration != generation || !connected }) return@thread
-                    val timestamp = System.currentTimeMillis() / 1000
-                    val timeKey = computeTimeKey(authCode, timestamp)
-                    rpcInternal("ping", JSONObject()
-                        .put("time_key", timeKey)
-                        .put("timestamp", timestamp))
-                } catch (_: InterruptedException) {
-                    return@thread
-                } catch (e: Exception) {
-                    Log.w(TAG, "Heartbeat failed", e)
-                }
+                    Thread.sleep(HEARTBEAT_MS)
+                    if (synchronized(lock) { socketGeneration != gen || !connected }) return@thread
+                    val ts = System.currentTimeMillis() / 1000
+                    val tk = computeTimeKey(authCode, ts)
+                    rpcInternal("ping", JSONObject().put("time_key", tk).put("timestamp", ts))
+                } catch (_: InterruptedException) { return@thread }
+                catch (e: Exception) { Log.w(TAG, "heartbeat", e) }
             }
         }
     }
@@ -328,119 +270,43 @@ object GoHomeSignalClient {
         heartbeatThread = null
     }
 
-    private fun scheduleReconnect(generation: Int) {
-        reconnectThread?.interrupt()
-        reconnectThread = thread(name = "go-home-reconnect", isDaemon = true) {
+    private fun scheduleReconnect(gen: Int) {
+        thread(name = "go-home-reconn", isDaemon = true) {
             try {
-                Thread.sleep(RECONNECT_DELAY_MS)
+                Thread.sleep(RECONNECT_MS)
                 synchronized(lock) {
-                    if (intentionalClose || socketGeneration != generation) return@thread
-                }
-                if (graceSecondsRemaining() == 0) {
-                    synchronized(lock) { lastError = "WebSocket grace period expired" }
-                    GoHomeTunnelRuntime.stop(null)
-                    return@thread
+                    if (intentionalClose || socketGeneration != gen) return@thread
                 }
                 val latch = CountDownLatch(1)
-                val wsURL = buildWSURL(server)
-                val request = Request.Builder().url(wsURL).build()
-                val currentAuthCode = authCode
-                val currentDeviceId = deviceId
-
-                val newWs = httpClient.newWebSocket(request, object : WebSocketListener() {
-                    override fun onOpen(webSocket: WebSocket, response: Response) {
-                        val timestamp = System.currentTimeMillis() / 1000
-                        val timeKey = computeTimeKey(currentAuthCode, timestamp)
-                        val authMsg = JSONObject()
-                            .put("jsonrpc", "2.0")
-                            .put("id", "auth-reconnect-${seq.incrementAndGet()}")
-                            .put("action", "device.auth")
-                            .put("params", JSONObject()
-                                .put("device_id", currentDeviceId)
-                                .put("device_type", "client")
-                                .put("auth_code", currentAuthCode)
-                                .put("time_key", timeKey)
-                                .put("timestamp", timestamp))
-                        webSocket.send(authMsg.toString())
-                        synchronized(lock) {
-                            if (socketGeneration != generation) { webSocket.close(1000, "stale"); return }
-                            ws = webSocket
-                            connected = true
-                            graceUntil = 0
-                            lastError = ""
-                        }
-                        startHeartbeat(generation)
-                        callback?.onConnected()
-                        latch.countDown()
-                    }
-
-                    override fun onMessage(webSocket: WebSocket, text: String) {
-                        handleMessage(text)
-                    }
-
-                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                        webSocket.close(1000, null)
-                    }
-
-                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                        handleClose(generation)
-                        latch.countDown()
-                    }
-
-                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                        synchronized(lock) {
-                            lastError = t.message ?: "reconnect failed"
-                            connected = false
-                        }
-                        latch.countDown()
-                        scheduleReconnect(generation)
-                    }
-                })
-                synchronized(lock) { ws = newWs }
+                val out = arrayOf("")
+                doConnect(gen, latch, out)
                 latch.await(15, TimeUnit.SECONDS)
-            } catch (_: InterruptedException) { }
+            } catch (_: Exception) {}
         }
     }
 
-    private fun stopInternal() {
+    private fun closeInternal() {
         stopHeartbeat()
-        reconnectThread?.interrupt()
-        reconnectThread = null
-        try { ws?.close(1000, "client disconnect") } catch (_: Exception) {}
+        try { ws?.close(1000, "bye") } catch (_: Exception) {}
         ws = null
         connected = false
-        rejectAllPending("signal closed")
+        failAllPending("closed")
     }
 
-    private fun rejectAllPending(message: String) {
-        for ((_, handler) in pending.entries) {
-            handler(SignalResult.failure(Exception(message)))
-        }
+    private fun failAllPending(msg: String) {
+        for ((_, h) in pending.entries) { h(false, msg) }
         pending.clear()
     }
 
-    private fun graceSecondsRemaining(): Int {
-        val until = synchronized(lock) { graceUntil }
-        if (until == 0L) return 0
-        return ((until - System.currentTimeMillis()) / 1000).toInt().coerceAtLeast(0)
-    }
-
     private fun buildWSURL(server: String): String {
-        var value = server.trim()
-        if (!value.contains("://")) value = "ws://$value"
-        val uri = java.net.URI(value)
+        var v = server.trim()
+        if (!v.contains("://")) v = "ws://$v"
+        val uri = java.net.URI(v)
         val scheme = when (uri.scheme?.lowercase()) {
-            "https" -> "wss"
-            "http" -> "ws"
-            else -> uri.scheme ?: "ws"
+            "https" -> "wss"; "http" -> "ws"; else -> uri.scheme ?: "ws"
         }
         val path = uri.path.let { if (it.isNullOrEmpty() || it == "/") "/ws" else it }
-        val port = uri.port.let { if (it == -1) "" else ":$it" }
+        val port = if (uri.port == -1) "" else ":${uri.port}"
         return "$scheme://${uri.host}$port$path"
-    }
-
-    private sealed class SignalResult<out T> {
-        data class Success<out T>(val value: T) : Result<T>()
-        data class Failure(val exception: Exception) : SignalResult<Nothing>()
     }
 }
