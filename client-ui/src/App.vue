@@ -123,10 +123,14 @@ async function connectServer() {
   try {
     await backend.connectServer(state.server, state.authCode)
     addSavedServer(state.server, state.authCode)
-    state.families = await backend.listFamilies()
+    const families = await backend.listFamilies()
+    state.families = families
+    if (!families || families.length === 0) {
+      state.error = '已连接服务器，但当前没有可见的家庭'
+    }
     state.page = 'families'
   } catch (error) {
-    state.error = error.message
+    state.error = error.message || '连接失败'
   } finally {
     state.connecting = false
   }
