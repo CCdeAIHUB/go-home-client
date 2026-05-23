@@ -45,7 +45,7 @@ object GoHomeSignalClient {
     private var socketGeneration = 0
 
     private val seq = AtomicInteger(0)
-    private val pending = ConcurrentHashMap<String, (Result<JSONObject>) -> Unit>()
+    private val pending = ConcurrentHashMap<String, (SignalResult<JSONObject>) -> Unit>()
     private var heartbeatThread: Thread? = null
     private var reconnectThread: Thread? = null
 
@@ -181,7 +181,7 @@ object GoHomeSignalClient {
             return JSONObject().put("error", "not connected").toString()
         }
 
-        val result = arrayOf<Result<JSONObject>?>(null)
+        val result = arrayOf<SignalResult<JSONObject>?>(null)
         val latch = CountDownLatch(1)
 
         pending[id] = { res ->
@@ -200,8 +200,8 @@ object GoHomeSignalClient {
                 JSONObject().put("error", "server response timeout").toString()
             } else {
                 when (val res = result[0]) {
-                    is Result.Success -> res.value.toString()
-                    is Result.Failure -> JSONObject().put("error", res.exception.message ?: "rpc failed").toString()
+                    is SignalResult.Success -> res.value.toString()
+                    is SignalResult.Failure -> JSONObject().put("error", res.exception.message ?: "rpc failed").toString()
                     else -> JSONObject().put("error", "unexpected result").toString()
                 }
             }
@@ -268,9 +268,9 @@ object GoHomeSignalClient {
                     val errMsg = env.optJSONObject("error")?.optString("message")
                         ?: env.optJSONObject("error")?.optString("code")
                         ?: "unknown error"
-                    handler(Result.failure(Exception(errMsg)))
+                    handler(SignalResult.failure(Exception(errMsg)))
                 } else {
-                    handler(Result.success(env.optJSONObject("result") ?: JSONObject()))
+                    handler(SignalResult.success(env.optJSONObject("result") ?: JSONObject()))
                 }
                 return
             }
@@ -414,7 +414,7 @@ object GoHomeSignalClient {
 
     private fun rejectAllPending(message: String) {
         for ((_, handler) in pending.entries) {
-            handler(Result.failure(Exception(message)))
+            handler(SignalResult.failure(Exception(message)))
         }
         pending.clear()
     }
@@ -439,8 +439,8 @@ object GoHomeSignalClient {
         return "$scheme://${uri.host}$port$path"
     }
 
-    private sealed class Result<out T> {
+    private sealed class SignalResult<out T> {
         data class Success<out T>(val value: T) : Result<T>()
-        data class Failure(val exception: Exception) : Result<Nothing>()
+        data class Failure(val exception: Exception) : SignalResult<Nothing>()
     }
 }
