@@ -6,6 +6,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -207,8 +208,18 @@ object GoHomeSignalClient {
                         ?: "unknown error"
                     handler(false, msg)
                 } else {
-                    val result = env.optJSONObject("result") ?: JSONObject()
-                    handler(true, result.toString())
+                    // Handle both JSON object and JSON array results
+                    val resultStr = if (env.has("result")) {
+                        val resultVal = env.get("result")
+                        when (resultVal) {
+                            is JSONObject -> resultVal.toString()
+                            is JSONArray -> resultVal.toString()
+                            else -> JSONObject().toString()
+                        }
+                    } else {
+                        JSONObject().toString()
+                    }
+                    handler(true, resultStr)
                 }
                 return
             }

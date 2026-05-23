@@ -18,7 +18,8 @@ const androidSignalAPI = {
     return this.getTunnelStatus()
   },
   async listFamilies() {
-    return androidRPC('client.family.list', {})
+    const result = await androidRPC('client.family.list', {})
+    return Array.isArray(result) ? result : (result.families || [])
   },
   async checkNetworkConflict(family) {
     const lanCIDR = family.lan_cidr || ''
@@ -55,6 +56,35 @@ const androidSignalAPI = {
   },
   async checkUpdate() {
     return { current: '0.2.0', latest: '0.2.0', update: false, configured: false }
+  },
+  // Family detail APIs
+  async listFamilyDevices(familyID) {
+    try {
+      const result = await androidRPC('client.family.devices', { family_id: familyID })
+      return Array.isArray(result) ? result : (result.devices || [])
+    } catch { return [] }
+  },
+  async getFamilyTraffic(familyID) {
+    try {
+      return await androidRPC('client.family.traffic', { family_id: familyID })
+    } catch { return { up: 0, down: 0 } }
+  },
+  async getFamilyLogs(familyID) {
+    try {
+      const result = await androidRPC('client.family.logs', { family_id: familyID, limit: 20 })
+      return Array.isArray(result) ? result : (result.logs || [])
+    } catch { return [] }
+  },
+  // Device detail APIs
+  async getDeviceInfo(deviceID) {
+    try {
+      return await androidRPC('client.device.info', { device_id: deviceID })
+    } catch { return {} }
+  },
+  async getDeviceTraffic(deviceID) {
+    try {
+      return await androidRPC('client.device.traffic', { device_id: deviceID })
+    } catch { return { up: 0, down: 0 } }
   }
 }
 
@@ -102,6 +132,21 @@ const controlAPI = {
   },
   async checkUpdate() {
     return request('/api/update')
+  },
+  async listFamilyDevices(familyID) {
+    return request(`/api/families/${familyID}/devices`)
+  },
+  async getFamilyTraffic(familyID) {
+    return request(`/api/families/${familyID}/traffic`)
+  },
+  async getFamilyLogs(familyID) {
+    return request(`/api/families/${familyID}/logs`)
+  },
+  async getDeviceInfo(deviceID) {
+    return request(`/api/devices/${encodeURIComponent(deviceID)}`)
+  },
+  async getDeviceTraffic(deviceID) {
+    return request(`/api/devices/${encodeURIComponent(deviceID)}/traffic`)
   }
 }
 
@@ -113,7 +158,9 @@ function androidRPC(action, params) {
 
 function readAndroidJSON(value) {
   if (!value) return {}
-  return JSON.parse(value)
+  const parsed = JSON.parse(value)
+  // If the Kotlin bridge returns a JSON array string, keep it as an array
+  return parsed
 }
 
 async function request(path, options = {}) {

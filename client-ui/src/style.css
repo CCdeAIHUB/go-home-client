@@ -94,12 +94,17 @@ nav button:hover {
   color: #245f73;
 }
 
+.back-btn {
+  color: #245f73 !important;
+  font-weight: 500;
+}
+
 .connect-view {
   display: grid;
   width: min(980px, calc(100vw - 32px));
   grid-template-columns: 1fr 380px;
   gap: 36px;
-  align-items: center;
+  align-items: start;
   margin: 10vh auto 0;
 }
 
@@ -142,6 +147,72 @@ label {
   align-items: start;
 }
 
+/* ── Saved servers ── */
+
+.saved-servers {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+}
+
+.saved-servers h3 {
+  margin: 0 0 12px;
+  color: #5f7070;
+  font-size: 15px;
+}
+
+.saved-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #d2dcdd;
+  border-radius: 8px;
+  background: white;
+  margin-top: 8px;
+  padding: 12px 16px;
+}
+
+.saved-info {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  cursor: pointer;
+  color: #245f73;
+}
+
+.saved-info div {
+  display: grid;
+  gap: 2px;
+}
+
+.saved-info strong {
+  font-size: 14px;
+}
+
+.saved-info span {
+  color: #657574;
+  font-size: 12px;
+}
+
+.icon-btn {
+  min-height: 36px;
+  background: transparent;
+  color: #657574;
+  padding: 0 8px;
+}
+
+.icon-btn:hover {
+  background: #e2eff1;
+  color: #245f73;
+}
+
+.danger-icon:hover {
+  background: #fde8e4;
+  color: #b3261e;
+}
+
+/* ── Family list ── */
+
 .family-row,
 .metric-grid article,
 .device-map,
@@ -160,16 +231,50 @@ label {
   padding: 16px;
 }
 
-.family-row div {
+.family-info {
   display: flex;
   flex-wrap: wrap;
   gap: 10px 14px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.family-info:hover {
+  opacity: 0.8;
+}
+
+.family-actions {
+  display: flex;
+  gap: 8px;
   align-items: center;
 }
 
 .family-row span {
   color: #657574;
 }
+
+/* ── Tags ── */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.tag-public {
+  background: #e2eff1;
+  color: #245f73;
+}
+
+.tag-private {
+  background: #fff4ef;
+  color: #a33b20;
+}
+
+/* ── Warning ── */
 
 .warning {
   display: flex;
@@ -245,6 +350,105 @@ label {
   font-size: 22px;
 }
 
+/* ── Sub sections (detail pages) ── */
+
+.sub-section {
+  margin-top: 20px;
+}
+
+.sub-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+/* ── Device rows ── */
+
+.device-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #d2dcdd;
+  border-radius: 8px;
+  background: white;
+  margin-top: 8px;
+  padding: 12px 16px;
+  cursor: pointer;
+}
+
+.device-row:hover {
+  border-color: #245f73;
+  box-shadow: 0 0 0 2px rgba(36, 95, 115, 0.08);
+}
+
+.device-info {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.device-info div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.device-info strong {
+  font-size: 14px;
+}
+
+/* ── Log rows ── */
+
+.log-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px solid #eee;
+  padding: 8px 0;
+  font-size: 13px;
+}
+
+.log-level {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.level-info { background: #e2eff1; color: #245f73; }
+.level-warn { background: #fff4ef; color: #a33b20; }
+.level-error { background: #fde8e4; color: #b3261e; }
+
+.log-msg {
+  color: #333;
+}
+
+.log-time {
+  color: #999;
+  font-size: 12px;
+}
+
+.empty-text {
+  color: #999;
+  margin: 12px 0;
+}
+
+.online-icon {
+  color: #2e8b57;
+}
+
+.offline-icon {
+  color: #999;
+}
+
+/* ── Device map ── */
+
 .device-map {
   display: grid;
   gap: 10px;
@@ -298,7 +502,8 @@ label {
   .family-row,
   .metric-grid,
   .device-map article,
-  .mode-grid {
+  .mode-grid,
+  .log-row {
     grid-template-columns: 1fr;
   }
 
