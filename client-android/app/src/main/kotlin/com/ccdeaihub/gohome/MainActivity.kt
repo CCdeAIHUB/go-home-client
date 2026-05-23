@@ -80,15 +80,7 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun timeKey(secret: String, timestampSeconds: Long): String {
-            val mac = HMac(SM3Digest())
-            mac.init(KeyParameter(secret.toByteArray(Charsets.UTF_8)))
-            val window = (timestampSeconds / 30L).toString().toByteArray(Charsets.UTF_8)
-            mac.update(window, 0, window.size)
-            val digest = ByteArray(mac.macSize)
-            mac.doFinal(digest, 0)
-            return digest.joinToString(separator = "") { "%02x".format(it) }
-        }
+        fun timeKey(secret: String, timestampSeconds: Long): String = staticTimeKey(secret, timestampSeconds)
 
         @JavascriptInterface
         fun vpnPermissionStatus(): String =
@@ -106,6 +98,42 @@ class MainActivity : Activity() {
             }
             return "requested"
         }
+
+        // ── Signal (WebSocket) API ──
+
+        @JavascriptInterface
+        fun signalConnect(server: String, authCode: String): String {
+            val devId = deviceId()
+            // Run on background thread to avoid blocking the JS thread
+            val result = arrayOf<String>("")
+            val latch = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                result[0] = GoHomeSignalClient.connect(server, authCode, devId)
+                latch.countDown()
+            }.start()
+            latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            return result[0]
+        }
+
+        @JavascriptInterface
+        fun signalDisconnect(): String = GoHomeSignalClient.disconnect()
+
+        @JavascriptInterface
+        fun signalRPC(action: String, paramsJSON: String): String {
+            val result = arrayOf<String>("")
+            val latch = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                result[0] = GoHomeSignalClient.rpc(action, paramsJSON)
+                latch.countDown()
+            }.start()
+            latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            return result[0]
+        }
+
+        @JavascriptInterface
+        fun signalStatus(): String = GoHomeSignalClient.getStatus()
+
+        // ── Tunnel (UDP) API ──
 
         @JavascriptInterface
         fun localNetworkConflict(cidr: String): Boolean = GoHomeTunnelRuntime.localNetworkConflict(cidr)
@@ -125,8 +153,21 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun disconnectTunnel(): Boolean {
+            GoHomeSignalClient.disconnect()
             GoHomeTunnelRuntime.stop(activity)
             return true
+        }
+
+        companion object {
+            fun staticTimeKey(secret: String, timestampSeconds: Long): String {
+                val mac = HMac(SM3Digest())
+                mac.init(KeyParameter(secret.toByteArray(Charsets.UTF_8)))
+                val window = (timestampSeconds / 30L).toString().toByteArray(Charsets.UTF_8)
+                mac.update(window, 0, window.size)
+                val digest = ByteArray(mac.macSize)
+                mac.doFinal(digest, 0)
+                return digest.joinToString(separator = "") { "%02x".format(it) }
+            }
         }
     }
 
