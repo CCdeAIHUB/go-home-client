@@ -1,4 +1,4 @@
-package com.ccdeaihub.gohome
+﻿package com.ccdeaihub.gohome
 
 import android.util.Log
 import okhttp3.OkHttpClient
@@ -86,7 +86,7 @@ object GoHomeSignalClient {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 // Authenticate immediately
                 val timestamp = System.currentTimeMillis() / 1000
-                val timeKey = GoHomeBridge.staticTimeKey(authCode, timestamp)
+                val timeKey = computeTimeKey(authCode, timestamp)
                 val authMsg = JSONObject()
                     .put("jsonrpc", "2.0")
                     .put("id", "auth-${seq.incrementAndGet()}")
@@ -310,7 +310,7 @@ object GoHomeSignalClient {
                     Thread.sleep(HEARTBEAT_INTERVAL_MS)
                     if (synchronized(lock) { socketGeneration != generation || !connected }) return@thread
                     val timestamp = System.currentTimeMillis() / 1000
-                    val timeKey = GoHomeBridge.staticTimeKey(authCode, timestamp)
+                    val timeKey = computeTimeKey(authCode, timestamp)
                     rpcInternal("ping", JSONObject()
                         .put("time_key", timeKey)
                         .put("timestamp", timestamp))
@@ -350,7 +350,7 @@ object GoHomeSignalClient {
                 val newWs = httpClient.newWebSocket(request, object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: Response) {
                         val timestamp = System.currentTimeMillis() / 1000
-                        val timeKey = GoHomeBridge.staticTimeKey(currentAuthCode, timestamp)
+                        val timeKey = computeTimeKey(currentAuthCode, timestamp)
                         val authMsg = JSONObject()
                             .put("jsonrpc", "2.0")
                             .put("id", "auth-reconnect-${seq.incrementAndGet()}")

@@ -80,7 +80,7 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun timeKey(secret: String, timestampSeconds: Long): String = staticTimeKey(secret, timestampSeconds)
+        fun timeKey(secret: String, timestampSeconds: Long): String = computeTimeKey(secret, timestampSeconds)
 
         @JavascriptInterface
         fun vpnPermissionStatus(): String =
@@ -159,19 +159,22 @@ class MainActivity : Activity() {
         }
 
         companion object {
-            fun staticTimeKey(secret: String, timestampSeconds: Long): String {
-                val mac = HMac(SM3Digest())
-                mac.init(KeyParameter(secret.toByteArray(Charsets.UTF_8)))
-                val window = (timestampSeconds / 30L).toString().toByteArray(Charsets.UTF_8)
-                mac.update(window, 0, window.size)
-                val digest = ByteArray(mac.macSize)
-                mac.doFinal(digest, 0)
-                return digest.joinToString(separator = "") { "%02x".format(it) }
-            }
+            fun staticTimeKey(secret: String, timestampSeconds: Long): String = computeTimeKey(secret, timestampSeconds)
         }
     }
 
     companion object {
         private const val VPN_PERMISSION_REQUEST = 4701
     }
+}
+
+/** Top-level SM3-HMAC time key function, shared by GoHomeBridge and GoHomeSignalClient. */
+fun computeTimeKey(secret: String, timestampSeconds: Long): String {
+    val mac = HMac(SM3Digest())
+    mac.init(KeyParameter(secret.toByteArray(Charsets.UTF_8)))
+    val window = (timestampSeconds / 30L).toString().toByteArray(Charsets.UTF_8)
+    mac.update(window, 0, window.size)
+    val digest = ByteArray(mac.macSize)
+    mac.doFinal(digest, 0)
+    return digest.joinToString(separator = "") { "%02x".format(it) }
 }
