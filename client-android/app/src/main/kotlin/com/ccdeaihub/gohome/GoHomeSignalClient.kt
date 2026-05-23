@@ -1,19 +1,24 @@
 package com.ccdeaihub.gohome
 
 import android.util.Log
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import org.json.JSONObject
-import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
  * Native WebSocket signalling client for Android.
- * All server WebSocket communication is handled in native Kotlin,
- * not in the WebView/JS layer — consistent with the architecture principle:
- * "the native shell owns all network I/O; the UI layer is display-only".
+ * Uses OkHttp WebSocket — the standard for Android WebSocket communication.
  *
- * Uses java.net.http.WebSocket (available on Android API 26+).
+ * Architecture: all network I/O is handled by the native Kotlin shell;
+ * the WebView/JS UI layer is display-only and communicates via GoHomeBridge.
  */
 object GoHomeSignalClient {
     private const val TAG = "GoHomeSignal"
@@ -22,8 +27,13 @@ object GoHomeSignalClient {
     private const val RECONNECT_DELAY_MS = 1_800L
     private const val GRACE_DURATION_MS = 30_000L
 
+    private val httpClient = OkHttpClient.Builder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(30, TimeUnit.SECONDS)
+        .build()
+
     private val lock = Object()
-    private var ws: java.net.http.WebSocket? = null
+    private var ws: WebSocket? = null
     private var server = ""
     private var authCode = ""
     private var deviceId = ""
@@ -41,7 +51,6 @@ object GoHomeSignalClient {
 
     private var callback: SignalCallback? = null
 
-    /** Callback interface for pushing events back to the UI layer (via GoHomeBridge). */
     interface SignalCallback {
         fun onConnected()
         fun onDisconnected(graceSeconds: Int, lastError: String)
@@ -66,12 +75,86 @@ object GoHomeSignalClient {
             this.graceUntil = 0
             this.socketGeneration += 1
         }
+        val latch = CountDownLatch(1)
+        val resultHolder = arrayOf<String?>("")
+        val generation = synchronized(lock) { socketGeneration }
+
+        val wsURL = buildWSURL(server)
+        val request = Request.Builder().url(wsURL).build()
+
+        val listener = object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                // Authenticate immediately
+                val timestamp = System.currentTimeMillis() / 1000
+                val timeKey = GoHomeBridge.staticTimeKey(authCode, timestamp)
+                val authMsg = JSONObject()
+                    .put("jsonrpc", "2.0")
+                    .put("id", "auth-${seq.incrementAndGet()}")
+                    .put("action", "device.auth")
+                    .put("params", JSONObject()
+                        .put("device_id", deviceId)
+                        .put("device_type", "client")
+                        .put("auth_code", authCode)
+                        .put("time_key", timeKey)
+                        .put("timestamp", timestamp))
+                webSocket.send(authMsg.toString())
+
+                synchronized(lock) {
+                    if (socketGeneration != generation) return
+                    connected = true
+                    graceUntil = 0
+                    lastError = ""
+                }
+                startHeartbeat(generation)
+                resultHolder[0] = JSONObject().put("ok", true).toString()
+                latch.countDown()
+                callback?.onConnected()
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                handleMessage(text)
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(1000, null)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                handleClose(generation)
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                synchronized(lock) {
+                    lastError = t.message ?: "websocket error"
+                    connected = false
+                    stopHeartbeat()
+                    rejectAllPending(lastError)
+                }
+                resultHolder[0] = JSONObject().put("error", lastError).toString()
+                latch.countDown()
+
+                val err: String
+                synchronized(lock) { err = lastError }
+                callback?.onDisconnected(0, err)
+
+                if (!synchronized(lock) { intentionalClose }) {
+                    scheduleReconnect(generation)
+                }
+            }
+        }
+
+        val newWs = httpClient.newWebSocket(request, listener)
+        synchronized(lock) { ws = newWs }
+
         return try {
-            openSignal()
-            JSONObject().put("ok", true).toString()
-        } catch (e: Exception) {
-            synchronized(lock) { lastError = e.message ?: "connection failed" }
-            JSONObject().put("error", e.message ?: "connection failed").toString()
+            if (!latch.await(15, TimeUnit.SECONDS)) {
+                synchronized(lock) { lastError = "connection timeout" }
+                JSONObject().put("error", "connection timeout").toString()
+            } else {
+                resultHolder[0] ?: JSONObject().put("error", "unknown error").toString()
+            }
+        } catch (e: InterruptedException) {
+            JSONObject().put("error", "interrupted").toString()
         }
     }
 
@@ -83,10 +166,6 @@ object GoHomeSignalClient {
         return JSONObject().put("ok", true).toString()
     }
 
-    /**
-     * Synchronous RPC call. Blocks until the server responds or timeout.
-     * Returns the result JSONObject as string, or {"error":"..."} on failure.
-     */
     fun rpc(action: String, paramsJSON: String): String {
         val id = "android-${seq.incrementAndGet()}"
         val envelope = JSONObject()
@@ -95,30 +174,28 @@ object GoHomeSignalClient {
             .put("action", action)
             .put("params", JSONObject(paramsJSON))
 
-        val currentWs: java.net.http.WebSocket?
+        val currentWs: WebSocket?
         synchronized(lock) { currentWs = ws }
 
-        if (currentWs == null || currentWs.isClosed) {
+        if (currentWs == null) {
             return JSONObject().put("error", "not connected").toString()
         }
 
         val result = arrayOf<Result<JSONObject>?>(null)
-        val latch = java.util.concurrent.CountDownLatch(1)
+        val latch = CountDownLatch(1)
 
         pending[id] = { res ->
             result[0] = res
             latch.countDown()
         }
 
-        try {
-            currentWs.sendText(envelope.toString(), true)
-        } catch (e: Exception) {
+        if (!currentWs.send(envelope.toString())) {
             pending.remove(id)
-            return JSONObject().put("error", e.message ?: "send failed").toString()
+            return JSONObject().put("error", "send failed").toString()
         }
 
         return try {
-            if (!latch.await(RPC_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            if (!latch.await(RPC_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 pending.remove(id)
                 JSONObject().put("error", "server response timeout").toString()
             } else {
@@ -145,7 +222,7 @@ object GoHomeSignalClient {
             .put("websocket", wsStatus)
             .put("udp", tunnel.optString("udp", "idle"))
             .put("grace_seconds", graceSeconds)
-            .put("last_error", tunnel.optString("last_error", "") ?: synchronized(lock) { lastError })
+            .put("last_error", synchronized(lock) { lastError })
             .toString()
     }
 
@@ -159,96 +236,24 @@ object GoHomeSignalClient {
 
     // ── Internal ──────────────────────────────────────────
 
-    private fun openSignal() {
-        val wsURL = buildWSURL(server)
-        val generation = synchronized(lock) { socketGeneration }
+    private fun handleClose(generation: Int) {
+        synchronized(lock) {
+            if (socketGeneration != generation) return
+            connected = false
+            stopHeartbeat()
+            rejectAllPending("server signal disconnected")
+        }
+        val graceSec = graceSecondsRemaining()
+        val err: String
+        synchronized(lock) { err = lastError }
+        callback?.onDisconnected(graceSec, err)
 
-        val listener = object : java.net.http.WebSocket.Listener {
-            private val buffer = StringBuilder()
-
-            override fun onOpen(webSocket: java.net.http.WebSocket) {
-                webSocket.request(1)
-
-                // Authenticate immediately
-                val timestamp = System.currentTimeMillis() / 1000
-                val timeKey = GoHomeBridge.staticTimeKey(authCode, timestamp)
-                val authMsg = JSONObject()
-                    .put("jsonrpc", "2.0")
-                    .put("id", "auth-${seq.incrementAndGet()}")
-                    .put("action", "device.auth")
-                    .put("params", JSONObject()
-                        .put("device_id", deviceId)
-                        .put("device_type", "client")
-                        .put("auth_code", authCode)
-                        .put("time_key", timeKey)
-                        .put("timestamp", timestamp))
-                webSocket.sendText(authMsg.toString(), true)
-
-                synchronized(lock) {
-                    if (socketGeneration != generation) return
-                    connected = true
-                    graceUntil = 0
-                    lastError = ""
-                }
-                startHeartbeat(generation)
-                callback?.onConnected()
-            }
-
-            override fun onText(webSocket: java.net.http.WebSocket, data: CharSequence, last: Boolean): java.net.http.WebSocket.Listener? {
-                buffer.append(data)
-                if (last) {
-                    handleMessage(buffer.toString())
-                    buffer.clear()
-                }
-                webSocket.request(1)
-                return this
-            }
-
-            override fun onClose(webSocket: java.net.http.WebSocket, statusCode: Int, reason: String) {
-                synchronized(lock) {
-                    if (socketGeneration != generation) return
-                    connected = false
-                    stopHeartbeat()
-                    rejectAllPending("server signal disconnected")
-                }
-                val err: String
-                synchronized(lock) { err = lastError }
-                callback?.onDisconnected(graceSecondsRemaining(), err)
-
-                if (!synchronized(lock) { intentionalClose }) {
-                    val tunnel = GoHomeTunnelRuntime.status()
-                    if (tunnel.optString("udp") == "connected" && graceSecondsRemaining() > 0) {
-                        scheduleReconnect(generation)
-                    }
-                }
-            }
-
-            override fun onError(webSocket: java.net.http.WebSocket, error: Throwable) {
-                synchronized(lock) {
-                    lastError = error.message ?: "websocket error"
-                    connected = false
-                    stopHeartbeat()
-                    rejectAllPending(lastError)
-                }
-                val err: String
-                synchronized(lock) { err = lastError }
-                callback?.onDisconnected(0, err)
-
-                if (!synchronized(lock) { intentionalClose }) {
-                    scheduleReconnect(generation)
-                }
+        if (!synchronized(lock) { intentionalClose }) {
+            val tunnel = GoHomeTunnelRuntime.status()
+            if (tunnel.optString("udp") == "connected" && graceSecondsRemaining() > 0) {
+                scheduleReconnect(generation)
             }
         }
-
-        val httpClient = java.net.http.HttpClient.newBuilder()
-            .version(java.net.http.HttpClient.Version.HTTP_1_1)
-            .build()
-
-        val newWs = httpClient.newWebSocketBuilder()
-            .buildAsync(URI.create(wsURL), listener)
-            .get() // block until connected
-
-        synchronized(lock) { ws = newWs }
     }
 
     private fun handleMessage(text: String) {
@@ -294,7 +299,7 @@ object GoHomeSignalClient {
             .put("id", id)
             .put("action", action)
             .put("params", params)
-        synchronized(lock) { ws?.sendText(envelope.toString(), true) }
+        synchronized(lock) { ws?.send(envelope.toString()) }
     }
 
     private fun startHeartbeat(generation: Int) {
@@ -336,7 +341,63 @@ object GoHomeSignalClient {
                     GoHomeTunnelRuntime.stop(null)
                     return@thread
                 }
-                openSignal()
+                val latch = CountDownLatch(1)
+                val wsURL = buildWSURL(server)
+                val request = Request.Builder().url(wsURL).build()
+                val currentAuthCode = authCode
+                val currentDeviceId = deviceId
+
+                val newWs = httpClient.newWebSocket(request, object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: Response) {
+                        val timestamp = System.currentTimeMillis() / 1000
+                        val timeKey = GoHomeBridge.staticTimeKey(currentAuthCode, timestamp)
+                        val authMsg = JSONObject()
+                            .put("jsonrpc", "2.0")
+                            .put("id", "auth-reconnect-${seq.incrementAndGet()}")
+                            .put("action", "device.auth")
+                            .put("params", JSONObject()
+                                .put("device_id", currentDeviceId)
+                                .put("device_type", "client")
+                                .put("auth_code", currentAuthCode)
+                                .put("time_key", timeKey)
+                                .put("timestamp", timestamp))
+                        webSocket.send(authMsg.toString())
+                        synchronized(lock) {
+                            if (socketGeneration != generation) { webSocket.close(1000, "stale"); return }
+                            ws = webSocket
+                            connected = true
+                            graceUntil = 0
+                            lastError = ""
+                        }
+                        startHeartbeat(generation)
+                        callback?.onConnected()
+                        latch.countDown()
+                    }
+
+                    override fun onMessage(webSocket: WebSocket, text: String) {
+                        handleMessage(text)
+                    }
+
+                    override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                        webSocket.close(1000, null)
+                    }
+
+                    override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                        handleClose(generation)
+                        latch.countDown()
+                    }
+
+                    override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                        synchronized(lock) {
+                            lastError = t.message ?: "reconnect failed"
+                            connected = false
+                        }
+                        latch.countDown()
+                        scheduleReconnect(generation)
+                    }
+                })
+                synchronized(lock) { ws = newWs }
+                latch.await(15, TimeUnit.SECONDS)
             } catch (_: InterruptedException) { }
         }
     }
@@ -345,7 +406,7 @@ object GoHomeSignalClient {
         stopHeartbeat()
         reconnectThread?.interrupt()
         reconnectThread = null
-        try { ws?.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "client disconnect") } catch (_: Exception) {}
+        try { ws?.close(1000, "client disconnect") } catch (_: Exception) {}
         ws = null
         connected = false
         rejectAllPending("signal closed")
@@ -367,7 +428,7 @@ object GoHomeSignalClient {
     private fun buildWSURL(server: String): String {
         var value = server.trim()
         if (!value.contains("://")) value = "ws://$value"
-        val uri = URI(value)
+        val uri = java.net.URI(value)
         val scheme = when (uri.scheme?.lowercase()) {
             "https" -> "wss"
             "http" -> "ws"
