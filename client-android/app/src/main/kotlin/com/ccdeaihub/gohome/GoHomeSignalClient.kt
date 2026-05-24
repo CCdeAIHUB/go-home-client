@@ -187,10 +187,11 @@ object GoHomeSignalClient {
                             true
                         }
                     }
-                    if (!shouldContinue) return@pending
-                    startHeartbeat(gen)
-                    out[0] = """{"ok":true}"""
-                    latch.countDown()
+                    if (shouldContinue) {
+                        startHeartbeat(gen)
+                        out[0] = """{"ok":true}"""
+                        latch.countDown()
+                    }
                 }
 
                 webSocket.send(authMsg.toString())
