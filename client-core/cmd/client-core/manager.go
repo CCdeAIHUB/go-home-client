@@ -402,18 +402,29 @@ func (m *clientManager) setRPCError(err error) {
 
 func (m *clientManager) handleRPCEvent(rpc *rpcClient, env protocol.Envelope) {
 	answerLatencyProbe(rpc, env)
-	if env.Action != protocol.EventFamilyLANChanged {
-		return
+	switch env.Action {
+	case protocol.EventFamilyLANChanged:
+		var params struct {
+			FamilyID int64  `json:"family_id"`
+			LANCIDR  string `json:"lan_cidr"`
+		}
+		if err := json.Unmarshal(env.Params, &params); err != nil {
+			m.setRPCError(err)
+			return
+		}
+		m.applyLANChange(params.FamilyID, params.LANCIDR)
+	case protocol.EventFamilyHomeServerChanged:
+		var params struct {
+			FamilyID     int64  `json:"family_id"`
+			HomeServerID string `json:"home_server_id"`
+			Online       bool   `json:"online"`
+		}
+		if err := json.Unmarshal(env.Params, &params); err != nil {
+			m.setRPCError(err)
+			return
+		}
+		m.applyHomeServerChange(params.FamilyID, params.Online)
 	}
-	var params struct {
-		FamilyID int64  `json:"family_id"`
-		LANCIDR  string `json:"lan_cidr"`
-	}
-	if err := json.Unmarshal(env.Params, &params); err != nil {
-		m.setRPCError(err)
-		return
-	}
-	m.applyLANChange(params.FamilyID, params.LANCIDR)
 }
 
 func (m *clientManager) applyLANChange(familyID int64, cidr string) {
@@ -435,6 +446,28 @@ func (m *clientManager) applyLANChange(familyID int64, cidr string) {
 		_ = active.link.Close()
 	}
 	active.cancel()
+}
+
+func (m *clientManager) applyHomeServerChange(familyID int64, online bool) {
+	m.mu.Lock()
+	for i := range m.families {
+		if m.families[i].ID == familyID {
+			m.families[i].HomeServerOnline = online
+		}
+	}
+	// 如果当前隧道对应的家庭服务器离线，断开隧道
+	active := m.tunnel
+	if !online && active != nil && active.offer.FamilyID == familyID {
+		m.tunnel = nil
+		m.lastRPCError = "home server went offline; tunnel disconnected"
+		m.mu.Unlock()
+		if active.link != nil {
+			_ = active.link.Close()
+		}
+		active.cancel()
+		return
+	}
+	m.mu.Unlock()
 }
 
 func (m *clientManager) familyCIDR(familyID int64) string {

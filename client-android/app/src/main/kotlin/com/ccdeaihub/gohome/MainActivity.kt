@@ -46,6 +46,20 @@ class MainActivity : Activity() {
         wv.addJavascriptInterface(GoHomeBridge(this), "GoHomeNative")
         wv.loadUrl("https://appassets.androidplatform.net/assets/ui/index.html")
         setContentView(wv)
+
+        // 服务器推送事件回调：家庭服务器状态变更时通知 WebView 刷新
+        GoHomeSignalClient.onEventCallback = { action, params ->
+            runOnUiThread {
+                try {
+                    webView?.evaluateJavascript(
+                        "if(window._goHomeServerEvent)window._goHomeServerEvent(${JSONObject.quote(action)},${JSONObject.quote(params)});",
+                        null
+                    )
+                } catch (e: Exception) {
+                    Log.e("GoHome", "Failed to post server event", e)
+                }
+            }
+        }
     }
 
     @Deprecated("Deprecated in Java")

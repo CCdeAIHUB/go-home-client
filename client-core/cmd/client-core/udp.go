@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,13 +23,14 @@ type punchClient struct {
 	key      []byte
 	hello    []byte
 
-	mu      sync.Mutex
-	peer    net.Addr
-	sendSeq uint64
-	replay  tunnel.ReplayWindow
-	ready   chan tunnel.Ready
-	pong    chan []byte
-	packets chan []byte
+	mu       sync.Mutex
+	peer     net.Addr
+	peers    []net.Addr // 候选端点列表，用于多路径打洞
+	sendSeq  uint64
+	replay   tunnel.ReplayWindow
+	ready    chan tunnel.Ready
+	pong     chan []byte
+	packets  chan []byte
 
 	punchStop chan struct{}
 	punchOnce sync.Once
@@ -74,6 +76,56 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 	if err != nil {
 		return nil, err
 	}
+	// 收集候选端点（observed + reported），用于多路径打洞
+	var peers []net.Addr
+	peers = append(peers, peer)
+	if offer.Server.ObservedEndpoint != "" && offer.Server.Endpoint != "" && offer.Server.ObservedEndpoint != offer.Server.Endpoint {
+		if alt, err := net.ResolveUDPAddr("udp", offer.Server.Endpoint); err == nil {
+			peers = append(peers, alt)
+		}
+	}
+	// 如果有 UDP 端口信息，尝试用 WebSocket remote IP + 报告的 UDP 端口
+	if offer.Server.UDPPort > 0 && offer.Server.Endpoint != "" {
+		host, _, splitErr := net.SplitHostPort(offer.Server.Endpoint)
+		if splitErr == nil {
+			reportedUDP := net.JoinHostPort(host, strconv.Itoa(offer.Server.UDPPort))
+			if reportedUDP != endpoint && reportedUDP != offer.Server.Endpoint {
+				if alt, err := net.ResolveUDPAddr("udp", reportedUDP); err == nil {
+					// 避免重复
+					dup := false
+					for _, p := range peers {
+						if p.String() == alt.String() {
+							dup = true
+							break
+						}
+					}
+					if !dup {
+						peers = append(peers, alt)
+					}
+				}
+			}
+		}
+	}
+	// 使用 WebSocket 源地址 IP + 报告的 UDP 端口作为额外候选
+	if offer.Server.RemoteAddr != "" && offer.Server.UDPPort > 0 {
+		host, _, splitErr := net.SplitHostPort(offer.Server.RemoteAddr)
+		if splitErr == nil {
+			remoteUDP := net.JoinHostPort(host, strconv.Itoa(offer.Server.UDPPort))
+			dup := false
+			for _, p := range peers {
+				if p.String() == remoteUDP {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				if alt, err := net.ResolveUDPAddr("udp", remoteUDP); err == nil {
+					peers = append(peers, alt)
+				}
+			}
+		}
+	}
+	log.Printf("UDP punch candidates for session %s: %v", offer.SessionID, peers)
 	return &punchClient{
 		conn:      conn,
 		deviceID:  deviceID,
@@ -81,6 +133,7 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 		key:       key,
 		hello:     hello,
 		peer:      peer,
+		peers:     peers,
 		ready:     make(chan tunnel.Ready, 1),
 		pong:      make(chan []byte, 1),
 		packets:   make(chan []byte, 64),
@@ -144,8 +197,18 @@ func (c *punchClient) KeepAlive(ctx context.Context) {
 
 func (c *punchClient) punchLoop(ctx context.Context) {
 	for attempt := 0; ; attempt++ {
-		if err := c.sendHello(); err != nil {
-			log.Printf("send UDP hello: %v", err)
+		// 向所有候选端点发送 Hello
+		c.mu.Lock()
+		peers := c.peers
+		c.mu.Unlock()
+		for _, p := range peers {
+			if _, err := c.conn.WriteTo(c.hello, p); err != nil {
+				log.Printf("send UDP hello to %s: %v", p, err)
+			} else {
+				c.statsMu.Lock()
+				c.up += uint64(len(c.hello))
+				c.statsMu.Unlock()
+			}
 		}
 		wait := time.Duration(attempt+1) * 120 * time.Millisecond
 		if wait > time.Second {

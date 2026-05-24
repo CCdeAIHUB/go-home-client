@@ -97,7 +97,42 @@ object GoHomeTunnelRuntime {
         val endpointStr = server.optString("observed_endpoint", "")
             .ifBlank { server.getString("endpoint") }
         var currentPeer = parseEndpoint(endpointStr)
-        val deadline = System.currentTimeMillis() + 12_000L
+        // 收集候选端点，用于多路径打洞
+        val candidates = mutableListOf(currentPeer)
+        val reportedEndpoint = server.optString("endpoint", "")
+        if (reportedEndpoint.isNotBlank() && reportedEndpoint != endpointStr) {
+            try { candidates.add(parseEndpoint(reportedEndpoint)) } catch (_: Exception) {}
+        }
+        // 尝试用 WebSocket remote IP + 报告的 UDP 端口
+        val udpPort = server.optInt("udp_port", 0)
+        if (udpPort > 0 && reportedEndpoint.isNotBlank()) {
+            val colonIdx = reportedEndpoint.lastIndexOf(':')
+            if (colonIdx > 0) {
+                val host = reportedEndpoint.substring(0, colonIdx)
+                val altEndpoint = "$host:$udpPort"
+                if (altEndpoint != endpointStr && altEndpoint != reportedEndpoint) {
+                    try { candidates.add(parseEndpoint(altEndpoint)) } catch (_: Exception) {}
+                }
+            }
+        }
+        // 使用 WebSocket 源地址 IP + 报告的 UDP 端口作为额外候选
+        val remoteAddr = server.optString("remote_addr", "")
+        if (udpPort > 0 && remoteAddr.isNotBlank()) {
+            val colonIdx = remoteAddr.lastIndexOf(':')
+            if (colonIdx > 0) {
+                val host = remoteAddr.substring(0, colonIdx)
+                val remoteUDP = "$host:$udpPort"
+                var isDup = false
+                for (c in candidates) {
+                    if (c.toString() == remoteUDP) { isDup = true; break }
+                }
+                if (!isDup) {
+                    try { candidates.add(parseEndpoint(remoteUDP)) } catch (_: Exception) {}
+                }
+            }
+        }
+        android.util.Log.d("GoHomeTunnel", "UDP punch candidates: $candidates")
+        val deadline = System.currentTimeMillis() + 15_000L
         var waitMillis = 120
 
         synchronized(lock) {
@@ -111,7 +146,10 @@ object GoHomeTunnelRuntime {
         }
 
         while (System.currentTimeMillis() < deadline) {
-            send(currentSocket, currentPeer, hello)
+            // 向所有候选端点发送 Hello（多路径打洞）
+            for (candidate in candidates) {
+                send(currentSocket, candidate, hello)
+            }
             val untilNextHello = min(waitMillis, (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receive(currentSocket, untilNextHello)
             if (packet != null) {

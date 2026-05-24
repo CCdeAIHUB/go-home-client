@@ -16,6 +16,27 @@ if (!window._goHomeTunnelCallbacks) {
   }
 }
 
+// Global callback for server push events (home server online/offline etc.)
+if (!window._goHomeServerEventHandlers) {
+  window._goHomeServerEventHandlers = []
+  window._goHomeServerEvent = function (action, paramsStr) {
+    try {
+      const params = JSON.parse(paramsStr)
+      window._goHomeServerEventHandlers.forEach(handler => {
+        try { handler(action, params) } catch (e) { console.error('server event handler error', e) }
+      })
+    } catch (e) { console.error('parse server event error', e) }
+  }
+}
+
+export function onServerEvent(handler) {
+  window._goHomeServerEventHandlers.push(handler)
+  return () => {
+    const idx = window._goHomeServerEventHandlers.indexOf(handler)
+    if (idx >= 0) window._goHomeServerEventHandlers.splice(idx, 1)
+  }
+}
+
 const androidSignalAPI = {
   async connectServer(server, authCode) {
     const result = readAndroidJSON(window.GoHomeNative.signalConnect(server, authCode))

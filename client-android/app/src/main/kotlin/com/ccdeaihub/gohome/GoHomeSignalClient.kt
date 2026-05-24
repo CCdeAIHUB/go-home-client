@@ -55,6 +55,9 @@ object GoHomeSignalClient {
     private var heartbeatThread: Thread? = null
     private var udpRegisterThread: Thread? = null
 
+    // 服务器推送事件回调（通知 WebView 刷新）
+    var onEventCallback: ((action: String, params: String) -> Unit)? = null
+
     // ── Public API ──
 
     fun connect(server: String, authCode: String, deviceId: String): String {
@@ -265,6 +268,12 @@ object GoHomeSignalClient {
                 synchronized(lock) { intentionalClose = true }
                 closeInternal()
                 GoHomeTunnelRuntime.stop(null)
+            } else if (action == "family.home_server_changed") {
+                // 家庭服务器状态变更，通知 UI 刷新
+                val params = env.optJSONObject("params")
+                if (params != null) {
+                    onEventCallback?.invoke("family.home_server_changed", params.toString())
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "handleMessage error", e)

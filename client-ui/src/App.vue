@@ -23,7 +23,7 @@ import {
   Wifi,
   WifiOff
 } from '@lucide/vue'
-import { api } from './api'
+import { api, onServerEvent } from './api'
 
 const backend = api()
 
@@ -59,6 +59,7 @@ const state = reactive({
 const currentFamily = computed(() => state.selectedFamily)
 
 let statusTimer = null
+let offServerEvent = null
 
 onMounted(() => {
   loadSavedServers()
@@ -73,10 +74,20 @@ onMounted(() => {
       refreshStatus().catch(() => {})
     }
   }, 1000)
+  // 监听服务器推送的家庭服务器状态变更事件
+  offServerEvent = onServerEvent((action, params) => {
+    if (action === 'family.home_server_changed' && state.page === 'families') {
+      // 刷新家庭列表
+      backend.listFamilies().then(families => {
+        state.families = families
+      }).catch(() => {})
+    }
+  })
 })
 
 onBeforeUnmount(() => {
   window.clearInterval(statusTimer)
+  if (offServerEvent) offServerEvent()
 })
 
 // ── Saved servers ──
