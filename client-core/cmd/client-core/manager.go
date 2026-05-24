@@ -693,7 +693,10 @@ func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string
 	m.mu.Unlock()
 
 	// 从 WebSocket URL 解析服务器主机名
-	parsed, err := url.Parse(strings.Replace(server, "ws://", "http://", 1))
+	wsURL := server
+	wsURL = strings.Replace(wsURL, "wss://", "https://", 1)
+	wsURL = strings.Replace(wsURL, "ws://", "http://", 1)
+	parsed, err := url.Parse(wsURL)
 	if err != nil {
 		return
 	}
