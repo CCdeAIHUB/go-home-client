@@ -180,11 +180,14 @@ object GoHomeSignalClient {
                             Log.w(TAG, "parse auth result", e)
                         }
                     }
-                    synchronized(lock) {
-                        if (socketGeneration != gen) return@ // stale
-                        connected = true
-                        lastError = ""
+                    val shouldContinue = synchronized(lock) {
+                        if (socketGeneration != gen) false else {
+                            connected = true
+                            lastError = ""
+                            true
+                        }
                     }
+                    if (!shouldContinue) return@pending
                     startHeartbeat(gen)
                     out[0] = """{"ok":true}"""
                     latch.countDown()
