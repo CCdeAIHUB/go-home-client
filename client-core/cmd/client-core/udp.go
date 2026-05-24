@@ -65,7 +65,12 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 	if err != nil {
 		return nil, err
 	}
-	peer, err := net.ResolveUDPAddr("udp", offer.Server.Endpoint)
+	// 优先使用服务器观察到的 NAT 映射端点
+	endpoint := offer.Server.Endpoint
+	if offer.Server.ObservedEndpoint != "" {
+		endpoint = offer.Server.ObservedEndpoint
+	}
+	peer, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
 		return nil, err
 	}

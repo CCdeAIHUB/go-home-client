@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/url"
 	"path"
@@ -33,6 +34,7 @@ type clientManager struct {
 	lastRPCError string
 	graceUntil   time.Time
 	reconnect    context.CancelFunc
+	registerStop context.CancelFunc
 }
 
 const websocketGracePeriod = 30 * time.Second
@@ -136,7 +138,7 @@ func (m *clientManager) dialAndAuth(ctx context.Context, server, authCode string
 	})
 
 	now := time.Now()
-	if _, err := rpc.Call(ctx, protocol.ActionDeviceAuth, protocol.DeviceAuthParams{
+	raw, err := rpc.Call(ctx, protocol.ActionDeviceAuth, protocol.DeviceAuthParams{
 		DeviceID:   m.deviceID,
 		DeviceType: protocol.DeviceTypeClient,
 		AuthCode:   authCode,
@@ -144,10 +146,22 @@ func (m *clientManager) dialAndAuth(ctx context.Context, server, authCode string
 		TimeKey:    security.GenerateTimeKey(authCode, now),
 		Timestamp:  now.Unix(),
 		UDPPort:    m.udpPort,
-	}); err != nil {
+	})
+	if err != nil {
 		_ = rpc.Close()
 		return nil, err
 	}
+
+	// 解析认证结果，获取 server_udp_port
+	var authResult protocol.DeviceAuthResult
+	if err := json.Unmarshal(raw, &authResult); err == nil && authResult.ServerUDPPort > 0 {
+		m.mu.Lock()
+		m.server = server
+		m.authCode = authCode
+		m.mu.Unlock()
+		go m.registerUDPLoop(ctx, server, authResult.ServerUDPPort, authResult.Token)
+	}
+
 	return rpc, nil
 }
 
@@ -161,7 +175,13 @@ func (m *clientManager) Disconnect() {
 	m.graceUntil = time.Time{}
 	reconnect := m.reconnect
 	m.reconnect = nil
+	registerStop := m.registerStop
+	m.registerStop = nil
 	m.mu.Unlock()
+
+	if registerStop != nil {
+		registerStop()
+	}
 
 	if reconnect != nil {
 		reconnect()
@@ -658,4 +678,55 @@ func virtualMAC(deviceID string) string {
 		mac[3+i%3] ^= sum[i]
 	}
 	return net.HardwareAddr(mac).String()
+}
+
+// registerUDPLoop 定期向公网服务器发送 UDP 注册探测包，
+// 让服务器发现本设备 NAT 映射后的公网端点。
+func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string, serverUDPPort int, token string) {
+	// 停止之前的注册循环
+	m.mu.Lock()
+	if m.registerStop != nil {
+		m.registerStop()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
+	m.registerStop = cancel
+	m.mu.Unlock()
+
+	// 从 WebSocket URL 解析服务器主机名
+	parsed, err := url.Parse(strings.Replace(server, "ws://", "http://", 1))
+	if err != nil {
+		return
+	}
+	host := parsed.Hostname()
+	serverAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, fmt.Sprintf("%d", serverUDPPort)))
+	if err != nil {
+		return
+	}
+
+	packet, err := tunnel.MarshalRegister(tunnel.Register{
+		DeviceID: m.deviceID,
+		Token:    token,
+	})
+	if err != nil {
+		return
+	}
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	// 立即发送一次
+	if _, err := m.udp.WriteTo(packet, serverAddr); err != nil {
+		log.Printf("send UDP register: %v", err)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := m.udp.WriteTo(packet, serverAddr); err != nil {
+				log.Printf("send UDP register: %v", err)
+			}
+		}
+	}
 }

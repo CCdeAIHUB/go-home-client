@@ -93,7 +93,10 @@ object GoHomeTunnelRuntime {
                 .put("client_device_id", clientID)
                 .put("encrypted_session_key", Base64.encodeToString(encryptedKey, Base64.NO_WRAP))
         )
-        var currentPeer = parseEndpoint(server.getString("endpoint"))
+        // 优先使用服务器观察到的 NAT 映射端点
+        val endpointStr = server.optString("observed_endpoint", "")
+            .ifBlank { server.getString("endpoint") }
+        var currentPeer = parseEndpoint(endpointStr)
         val deadline = System.currentTimeMillis() + 12_000L
         var waitMillis = 120
 

@@ -8,6 +8,10 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -24,6 +28,12 @@ object GoHomeSignalClient {
     private const val RPC_TIMEOUT_S = 12L
     private const val HEARTBEAT_MS = 25_000L
     private const val RECONNECT_MS = 1_800L
+    private const val UDP_REGISTER_MS = 15_000L
+
+    // GHU1 magic bytes for UDP registration packets
+    private val MAGIC = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
+    private const val VERSION: Byte = 1
+    private const val PACKET_REGISTER: Byte = 4
 
     private val httpClient = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -43,6 +53,7 @@ object GoHomeSignalClient {
     private val seq = AtomicInteger(0)
     private val pending = ConcurrentHashMap<String, (ok: Boolean, data: String) -> Unit>()
     private var heartbeatThread: Thread? = null
+    private var udpRegisterThread: Thread? = null
 
     // ── Public API ──
 
@@ -137,14 +148,16 @@ object GoHomeSignalClient {
         val request = Request.Builder().url(wsURL).build()
         val currentAuth = authCode
         val currentDev = deviceId
+        val currentServer = server
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                val authId = "auth-${seq.incrementAndGet()}"
                 val ts = System.currentTimeMillis() / 1000
                 val tk = computeTimeKey(currentAuth, ts)
                 val authMsg = JSONObject()
                     .put("jsonrpc", "2.0")
-                    .put("id", "auth-${seq.incrementAndGet()}")
+                    .put("id", authId)
                     .put("action", "device.auth")
                     .put("params", JSONObject()
                         .put("device_id", currentDev)
@@ -152,16 +165,32 @@ object GoHomeSignalClient {
                         .put("auth_code", currentAuth)
                         .put("time_key", tk)
                         .put("timestamp", ts))
-                webSocket.send(authMsg.toString())
 
-                synchronized(lock) {
-                    if (socketGeneration != gen) { webSocket.close(1000, "stale"); return }
-                    connected = true
-                    lastError = ""
+                // Register handler for auth response to get server_udp_port
+                pending[authId] = { ok, data ->
+                    if (ok) {
+                        try {
+                            val result = JSONObject(data)
+                            val serverUdpPort = result.optInt("server_udp_port", 0)
+                            val token = result.optString("token", "")
+                            if (serverUdpPort > 0 && token.isNotEmpty()) {
+                                startUDPRegistration(gen, currentServer, serverUdpPort, currentDev, token)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "parse auth result", e)
+                        }
+                    }
+                    synchronized(lock) {
+                        if (socketGeneration != gen) return@ // stale
+                        connected = true
+                        lastError = ""
+                    }
+                    startHeartbeat(gen)
+                    out[0] = """{"ok":true}"""
+                    latch.countDown()
                 }
-                startHeartbeat(gen)
-                out[0] = """{"ok":true}"""
-                latch.countDown()
+
+                webSocket.send(authMsg.toString())
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -253,6 +282,7 @@ object GoHomeSignalClient {
             if (socketGeneration != gen) return
             connected = false
             stopHeartbeat()
+            stopUDPRegistration()
             failAllPending("disconnected")
         }
         if (!synchronized(lock) { intentionalClose }) {
@@ -281,6 +311,70 @@ object GoHomeSignalClient {
         heartbeatThread = null
     }
 
+    // ── UDP Registration (NAT Endpoint Discovery) ──
+
+    private fun startUDPRegistration(gen: Int, serverURL: String, serverUDPPort: Int, deviceID: String, token: String) {
+        stopUDPRegistration()
+        udpRegisterThread = thread(name = "go-home-udp-reg", isDaemon = true) {
+            try {
+                // Parse server host from WebSocket URL
+                val host = parseServerHost(serverURL) ?: return@thread
+                val serverAddr = InetAddress.getByName(host)
+                val registerPacket = buildRegisterPacket(deviceID, token) ?: return@thread
+
+                // Send immediately
+                sendUDPRegister(serverAddr, serverUDPPort, registerPacket)
+
+                while (!Thread.interrupted()) {
+                    Thread.sleep(UDP_REGISTER_MS)
+                    if (synchronized(lock) { socketGeneration != gen || !connected }) return@thread
+                    sendUDPRegister(serverAddr, serverUDPPort, registerPacket)
+                }
+            } catch (_: InterruptedException) { }
+            catch (e: Exception) { Log.w(TAG, "UDP register error", e) }
+        }
+    }
+
+    private fun stopUDPRegistration() {
+        udpRegisterThread?.interrupt()
+        udpRegisterThread = null
+    }
+
+    private fun sendUDPRegister(addr: InetAddress, port: Int, packet: ByteArray) {
+        try {
+            val socket = DatagramSocket()
+            socket.send(DatagramPacket(packet, packet.size, addr, port))
+            socket.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "send UDP register", e)
+        }
+    }
+
+    private fun buildRegisterPacket(deviceID: String, token: String): ByteArray? {
+        try {
+            val json = JSONObject()
+                .put("device_id", deviceID)
+                .put("token", token)
+                .toString()
+                .toByteArray(Charsets.UTF_8)
+            return MAGIC + byteArrayOf(VERSION, PACKET_REGISTER) + json
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun parseServerHost(serverURL: String): String? {
+        try {
+            var v = serverURL.trim()
+            if (!v.contains("://")) v = "ws://$v"
+            return URI(v).host
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    // ── Reconnection ──
+
     private fun scheduleReconnect(gen: Int) {
         thread(name = "go-home-reconn", isDaemon = true) {
             try {
@@ -298,6 +392,7 @@ object GoHomeSignalClient {
 
     private fun closeInternal() {
         stopHeartbeat()
+        stopUDPRegistration()
         try { ws?.close(1000, "bye") } catch (_: Exception) {}
         ws = null
         connected = false
@@ -312,7 +407,7 @@ object GoHomeSignalClient {
     private fun buildWSURL(server: String): String {
         var v = server.trim()
         if (!v.contains("://")) v = "ws://$v"
-        val uri = java.net.URI(v)
+        val uri = URI(v)
         val scheme = when (uri.scheme?.lowercase()) {
             "https" -> "wss"; "http" -> "ws"; else -> uri.scheme ?: "ws"
         }
