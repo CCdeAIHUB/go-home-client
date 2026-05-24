@@ -139,11 +139,36 @@ class MainActivity : Activity() {
         fun localNetworkConflict(cidr: String): Boolean = GoHomeTunnelRuntime.localNetworkConflict(cidr)
 
         @JavascriptInterface
-        fun prepareTunnel(deviceID: String): String = GoHomeTunnelRuntime.prepare(deviceID).toString()
+        fun prepareTunnel(deviceID: String): String {
+            val result = arrayOf<String>("")
+            val latch = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                try {
+                    result[0] = GoHomeTunnelRuntime.prepare(deviceID).toString()
+                } catch (e: Exception) {
+                    result[0] = """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                }
+                latch.countDown()
+            }.start()
+            latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            return result[0]
+        }
 
         @JavascriptInterface
-        fun connectTunnel(offer: String, mode: String, virtualCIDR: String): String =
-            GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+        fun connectTunnel(offer: String, mode: String, virtualCIDR: String): String {
+            val result = arrayOf<String>("")
+            val latch = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                try {
+                    result[0] = GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+                } catch (e: Exception) {
+                    result[0] = """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                }
+                latch.countDown()
+            }.start()
+            latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            return result[0]
+        }
 
         @JavascriptInterface
         fun tunnelStatus(): String = GoHomeTunnelRuntime.status().toString()
