@@ -7,6 +7,7 @@ import android.content.pm.ApplicationInfo
 import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -16,29 +17,35 @@ import androidx.webkit.WebViewClientCompat
 import org.bouncycastle.crypto.digests.SM3Digest
 import org.bouncycastle.crypto.macs.HMac
 import org.bouncycastle.crypto.params.KeyParameter
+import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class MainActivity : Activity() {
     private var vpnPermissionGranted = false
+    private var vpnPermissionLatch: CountDownLatch? = null
+    private var webView: WebView? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val webView = WebView(this)
+        val wv = WebView(this)
+        webView = wv
         val assetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
 
         val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         WebView.setWebContentsDebuggingEnabled(debuggable)
-        webView.settings.javaScriptEnabled = true
-        webView.settings.domStorageEnabled = true
-        webView.settings.allowFileAccess = false
-        webView.webViewClient = LocalContentClient(assetLoader)
-        webView.addJavascriptInterface(GoHomeBridge(this), "GoHomeNative")
-        webView.loadUrl("https://appassets.androidplatform.net/assets/ui/index.html")
-        setContentView(webView)
+        wv.settings.javaScriptEnabled = true
+        wv.settings.domStorageEnabled = true
+        wv.settings.allowFileAccess = false
+        wv.webViewClient = LocalContentClient(assetLoader)
+        wv.addJavascriptInterface(GoHomeBridge(this), "GoHomeNative")
+        wv.loadUrl("https://appassets.androidplatform.net/assets/ui/index.html")
+        setContentView(wv)
     }
 
     @Deprecated("Deprecated in Java")
@@ -46,6 +53,7 @@ class MainActivity : Activity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == VPN_PERMISSION_REQUEST) {
             vpnPermissionGranted = resultCode == RESULT_OK
+            vpnPermissionLatch?.countDown()
         }
     }
 
@@ -86,17 +94,35 @@ class MainActivity : Activity() {
         fun vpnPermissionStatus(): String =
             if (activity.vpnPermissionGranted || VpnService.prepare(activity) == null) "granted" else "required"
 
+        /**
+         * Request VPN permission and wait for the user's response.
+         * Returns "granted" if permission is already granted or user grants it,
+         * "denied" if user rejects, "timeout" if waiting too long.
+         * This method blocks the calling thread (should be called from a background thread).
+         */
         @JavascriptInterface
         fun requestVpnPermission(): String {
-            val prepareIntent = VpnService.prepare(activity)
-            if (prepareIntent == null) {
+            // Already granted?
+            if (activity.vpnPermissionGranted || VpnService.prepare(activity) == null) {
                 activity.vpnPermissionGranted = true
                 return "granted"
             }
+            // Set up latch and launch permission intent on UI thread
+            val latch = CountDownLatch(1)
+            activity.vpnPermissionLatch = latch
             activity.runOnUiThread {
-                activity.startActivityForResult(prepareIntent, VPN_PERMISSION_REQUEST)
+                val prepareIntent = VpnService.prepare(activity)
+                if (prepareIntent == null) {
+                    activity.vpnPermissionGranted = true
+                    latch.countDown()
+                } else {
+                    activity.startActivityForResult(prepareIntent, VPN_PERMISSION_REQUEST)
+                }
             }
-            return "requested"
+            // Wait for user response (up to 60 seconds)
+            val granted = latch.await(60, TimeUnit.SECONDS)
+            activity.vpnPermissionLatch = null
+            return if (granted && activity.vpnPermissionGranted) "granted" else "denied"
         }
 
         // ── Signal (WebSocket) API ──
@@ -104,14 +130,13 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun signalConnect(server: String, authCode: String): String {
             val devId = deviceId()
-            // Run on background thread to avoid blocking the JS thread
             val result = arrayOf<String>("")
-            val latch = java.util.concurrent.CountDownLatch(1)
+            val latch = CountDownLatch(1)
             Thread {
                 result[0] = GoHomeSignalClient.connect(server, authCode, devId)
                 latch.countDown()
             }.start()
-            latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            latch.await(15, TimeUnit.SECONDS)
             return result[0]
         }
 
@@ -121,12 +146,12 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun signalRPC(action: String, paramsJSON: String): String {
             val result = arrayOf<String>("")
-            val latch = java.util.concurrent.CountDownLatch(1)
+            val latch = CountDownLatch(1)
             Thread {
                 result[0] = GoHomeSignalClient.rpc(action, paramsJSON)
                 latch.countDown()
             }.start()
-            latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            latch.await(15, TimeUnit.SECONDS)
             return result[0]
         }
 
@@ -141,7 +166,7 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun prepareTunnel(deviceID: String): String {
             val result = arrayOf<String>("")
-            val latch = java.util.concurrent.CountDownLatch(1)
+            val latch = CountDownLatch(1)
             Thread {
                 try {
                     result[0] = GoHomeTunnelRuntime.prepare(deviceID).toString()
@@ -150,14 +175,47 @@ class MainActivity : Activity() {
                 }
                 latch.countDown()
             }.start()
-            latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            latch.await(5, TimeUnit.SECONDS)
             return result[0]
         }
 
+        /**
+         * Connect tunnel asynchronously.
+         * Returns a callback ID immediately, then posts the result via
+         * window._goHomeTunnelResult(callbackId, jsonResult) when done.
+         * This ensures the JS thread is not blocked and the UI can show loading state.
+         */
+        private var tunnelCallbackSeq = 0
+
+        @JavascriptInterface
+        fun connectTunnelAsync(offer: String, mode: String, virtualCIDR: String): String {
+            val callbackId = "tunnel-${tunnelCallbackSeq++}"
+            Thread {
+                val jsonResult = try {
+                    GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+                } catch (e: Exception) {
+                    """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                }
+                // Post result back to JS on the main thread
+                activity.runOnUiThread {
+                    try {
+                        activity.webView?.evaluateJavascript(
+                            "if(window._goHomeTunnelResult)window._goHomeTunnelResult('$callbackId',${JSONObject.quote(jsonResult)});",
+                            null
+                        )
+                    } catch (e: Exception) {
+                        Log.e("GoHome", "Failed to post tunnel result", e)
+                    }
+                }
+            }.start()
+            return callbackId
+        }
+
+        // Keep sync version as fallback (not used by new UI)
         @JavascriptInterface
         fun connectTunnel(offer: String, mode: String, virtualCIDR: String): String {
             val result = arrayOf<String>("")
-            val latch = java.util.concurrent.CountDownLatch(1)
+            val latch = CountDownLatch(1)
             Thread {
                 try {
                     result[0] = GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
@@ -166,7 +224,7 @@ class MainActivity : Activity() {
                 }
                 latch.countDown()
             }.start()
-            latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            latch.await(15, TimeUnit.SECONDS)
             return result[0]
         }
 

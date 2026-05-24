@@ -485,6 +485,12 @@ label {
   color: #b3261e;
 }
 
+.hint-text {
+  margin: 0;
+  color: #5f6368;
+  font-size: 0.85em;
+}
+
 .spin {
   animation: spin 0.8s linear infinite;
 }

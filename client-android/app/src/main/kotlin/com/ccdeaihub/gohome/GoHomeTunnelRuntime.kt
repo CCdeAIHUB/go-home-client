@@ -228,7 +228,19 @@ object GoHomeTunnelRuntime {
         val intent = Intent(activity, GoHomeVpnService::class.java)
             .putExtra(GoHomeVpnService.EXTRA_HOME_CIDR, routeCIDR)
             .putExtra(GoHomeVpnService.EXTRA_VIRTUAL_ADDRESS, clientAddress)
-        activity.startService(intent)
+        // Must start the VPN service on the UI thread for Android compatibility
+        val latch = java.util.concurrent.CountDownLatch(1)
+        activity.runOnUiThread {
+            try {
+                activity.startService(intent)
+            } catch (e: Exception) {
+                setError("Failed to start VPN service: ${e.message}")
+            }
+            latch.countDown()
+        }
+        latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        // Give the VPN service a moment to establish the interface
+        Thread.sleep(300)
     }
 
     private fun readyToView(ready: JSONObject, mode: String, virtualCIDR: String): JSONObject {

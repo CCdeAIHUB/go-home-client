@@ -4,6 +4,18 @@ export function api() {
   return controlAPI
 }
 
+// Global callback map for async tunnel results
+if (!window._goHomeTunnelCallbacks) {
+  window._goHomeTunnelCallbacks = {}
+  window._goHomeTunnelResult = function (callbackId, jsonResult) {
+    const handler = window._goHomeTunnelCallbacks[callbackId]
+    if (handler) {
+      delete window._goHomeTunnelCallbacks[callbackId]
+      handler(jsonResult)
+    }
+  }
+}
+
 const androidSignalAPI = {
   async connectServer(server, authCode) {
     const result = readAndroidJSON(window.GoHomeNative.signalConnect(server, authCode))
@@ -26,14 +38,27 @@ const androidSignalAPI = {
     return { conflict: lanCIDR ? window.GoHomeNative.localNetworkConflict(lanCIDR) : false, lan_cidr: lanCIDR }
   },
   async requestLayer3Permission() {
-    return { status: window.GoHomeNative.requestVpnPermission() }
+    // Check current status first
+    const currentStatus = window.GoHomeNative.vpnPermissionStatus()
+    if (currentStatus === 'granted') return { status: 'granted' }
+    // Request permission and wait for user response (runs on background thread in Kotlin)
+    const result = window.GoHomeNative.requestVpnPermission()
+    return { status: result }
   },
   async connectFamily(familyID, options) {
+    // Step 1: Ensure VPN permission is granted before connecting
     if (window.GoHomeNative.vpnPermissionStatus() !== 'granted') {
-      window.GoHomeNative.requestVpnPermission()
-      throw new Error('Allow Android VPN permission and connect again')
+      const permResult = window.GoHomeNative.requestVpnPermission()
+      if (permResult !== 'granted') {
+        throw new Error('需要 VPN 权限才能建立直连，请在弹出的对话框中允许')
+      }
     }
+
+    // Step 2: Prepare UDP tunnel
     const prepared = readAndroidJSON(window.GoHomeNative.prepareTunnel(window.GoHomeNative.deviceId()))
+    if (prepared.error) throw new Error(prepared.error)
+
+    // Step 3: Request hole punch via signal server
     const offer = await androidRPC('p2p.hole_punch_req', {
       family_id: familyID,
       client_udp_port: prepared.udp_port,
@@ -41,11 +66,17 @@ const androidSignalAPI = {
       virtual_cidr: options.virtual_cidr || '',
       client_virtual_mac: prepared.client_virtual_mac
     })
-    return readAndroidJSON(window.GoHomeNative.connectTunnel(
-      JSON.stringify(offer),
-      options.mode,
-      options.virtual_cidr || ''
-    ))
+
+    // Step 4: Connect tunnel (use async version if available for better UX)
+    if (window.GoHomeNative.connectTunnelAsync) {
+      return await connectTunnelAsync(offer, options.mode, options.virtual_cidr || '')
+    } else {
+      return readAndroidJSON(window.GoHomeNative.connectTunnel(
+        JSON.stringify(offer),
+        options.mode,
+        options.virtual_cidr || ''
+      ))
+    }
   },
   async getTrafficStats() {
     const status = readAndroidJSON(window.GoHomeNative.signalStatus())
@@ -86,6 +117,33 @@ const androidSignalAPI = {
       return await androidRPC('client.device.traffic', { device_id: deviceID })
     } catch { return { up: 0, down: 0 } }
   }
+}
+
+/**
+ * Connect tunnel asynchronously - returns a Promise that resolves
+ * when the native side calls window._goHomeTunnelResult().
+ * This keeps the JS thread free so the UI can render loading states.
+ */
+function connectTunnelAsync(offer, mode, virtualCIDR) {
+  return new Promise((resolve, reject) => {
+    const callbackId = window.GoHomeNative.connectTunnelAsync(
+      JSON.stringify(offer), mode, virtualCIDR
+    )
+    const timeout = setTimeout(() => {
+      delete window._goHomeTunnelCallbacks[callbackId]
+      reject(new Error('连接超时'))
+    }, 20000)
+
+    window._goHomeTunnelCallbacks[callbackId] = (jsonStr) => {
+      clearTimeout(timeout)
+      const result = readAndroidJSON(jsonStr)
+      if (result.error) {
+        reject(new Error(result.error))
+      } else {
+        resolve(result)
+      }
+    }
+  })
 }
 
 const controlAPI = {

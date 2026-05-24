@@ -506,13 +506,14 @@ function timeAgo(ts) {
       <form class="config-panel" @submit.prevent="connectFamily">
         <label v-if="state.networkMode === 'mapped'">
           备用虚拟网段
-          <input v-model="state.virtualCIDR" />
+          <input v-model="state.virtualCIDR" :disabled="state.connecting" />
         </label>
         <button type="submit" :disabled="state.connecting">
           <Loader2 v-if="state.connecting" class="spin" :size="18" />
           <PlugZap v-else :size="18" />
-          {{ state.connecting ? '正在打洞' : '建立直连' }}
+          {{ state.connecting ? '正在建立直连…' : '建立直连' }}
         </button>
+        <p v-if="state.connecting" class="hint-text">正在与家庭服务器建立 UDP 隧道，请稍候…</p>
         <p v-if="state.error" class="error-text">{{ state.error }}</p>
       </form>
     </section>
