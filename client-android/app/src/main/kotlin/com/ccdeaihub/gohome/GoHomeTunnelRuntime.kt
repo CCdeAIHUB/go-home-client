@@ -478,7 +478,7 @@ object GoHomeTunnelRuntime {
         }
     }
 
-    private fun setError(message: String) {
+    internal fun setError(message: String) {
         synchronized(lock) { lastError = message }
     }
 
