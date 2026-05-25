@@ -70,7 +70,7 @@ func main() {
 	})
 
 	now := time.Now()
-	if _, err := rpc.Call(ctx, protocol.ActionDeviceAuth, protocol.DeviceAuthParams{
+	rawAuth, err := rpc.Call(ctx, protocol.ActionDeviceAuth, protocol.DeviceAuthParams{
 		DeviceID:   deviceID,
 		DeviceType: protocol.DeviceTypeClient,
 		AuthCode:   *authCode,
@@ -78,8 +78,15 @@ func main() {
 		TimeKey:    security.GenerateTimeKey(*authCode, now),
 		Timestamp:  now.Unix(),
 		UDPPort:    *udpPort,
-	}); err != nil {
+	})
+	if err != nil {
 		log.Fatalf("device auth: %v", err)
+	}
+	var authResult protocol.DeviceAuthResult
+	if err := json.Unmarshal(rawAuth, &authResult); err == nil && authResult.Token != "" {
+		if ports := serverUDPPorts(authResult); len(ports) > 0 {
+			go registerUDPLoop(ctx, *serverURL, ports, deviceID, authResult.Token, udpConn)
+		}
 	}
 
 	families, err := listFamilies(ctx, rpc)

@@ -43,7 +43,7 @@ object GoHomeSignalClient {
     private var deviceId = ""
     private var deviceToken = ""
     private var udpRegisterHost = ""
-    private var udpRegisterPort = 0
+    private var udpRegisterPorts = emptyList<Int>()
     private var connected = false
     private var intentionalClose = false
     private var lastError = ""
@@ -67,7 +67,7 @@ object GoHomeSignalClient {
             this.deviceId = deviceId
             this.deviceToken = ""
             this.udpRegisterHost = ""
-            this.udpRegisterPort = 0
+            this.udpRegisterPorts = emptyList()
             this.intentionalClose = false
             this.lastError = ""
             this.socketGeneration += 1
@@ -147,30 +147,32 @@ object GoHomeSignalClient {
 
     fun registerTunnelEndpoint(): String {
         val target = synchronized(lock) {
-            UDPRegisterTarget(udpRegisterHost, udpRegisterPort, deviceId, deviceToken, connected)
+            UDPRegisterTarget(udpRegisterHost, udpRegisterPorts, deviceId, deviceToken, connected)
         }
         if (!target.connected) return """{"error":"not connected"}"""
-        if (target.host.isBlank() || target.port <= 0) return """{"error":"server UDP discovery is unavailable"}"""
+        if (target.host.isBlank() || target.ports.isEmpty()) return """{"error":"server UDP discovery is unavailable"}"""
         if (target.deviceID.isBlank() || target.token.isBlank()) return """{"error":"device token is unavailable"}"""
         val packet = buildRegisterPacket(target.deviceID, target.token)
             ?: return """{"error":"build register packet failed"}"""
         var sent = 0
         var lastError = ""
         repeat(4) { index ->
-            try {
-                if (GoHomeTunnelRuntime.sendRegister(target.host, target.port, packet)) {
-                    sent += 1
+            for (port in target.ports) {
+                try {
+                    if (GoHomeTunnelRuntime.sendRegister(target.host, port, packet)) {
+                        sent += 1
+                    }
+                } catch (e: Exception) {
+                    lastError = e.message ?: "send UDP register failed"
+                    Log.w(TAG, "register prepared UDP endpoint", e)
                 }
-            } catch (e: Exception) {
-                lastError = e.message ?: "send UDP register failed"
-                Log.w(TAG, "register prepared UDP endpoint", e)
             }
             if (index < 3) {
                 try { Thread.sleep(120) } catch (_: InterruptedException) { return@repeat }
             }
         }
         return if (sent > 0) {
-            JSONObject().put("ok", true).put("sent", sent).toString()
+            JSONObject().put("ok", true).put("sent", sent).put("ports", JSONArray(target.ports)).toString()
         } else {
             """{"error":${JSONObject.quote(lastError.ifBlank { "send UDP register failed" })}}"""
         }
@@ -207,13 +209,26 @@ object GoHomeSignalClient {
                         try {
                             val result = JSONObject(data)
                             val serverUdpPort = result.optInt("server_udp_port", 0)
+                            val serverUdpPorts = mutableListOf<Int>()
+                            val portsJSON = result.optJSONArray("server_udp_ports")
+                            if (portsJSON != null) {
+                                for (index in 0 until portsJSON.length()) {
+                                    val port = portsJSON.optInt(index, 0)
+                                    if (port in 1..65535 && !serverUdpPorts.contains(port)) {
+                                        serverUdpPorts.add(port)
+                                    }
+                                }
+                            }
+                            if (serverUdpPort in 1..65535 && !serverUdpPorts.contains(serverUdpPort)) {
+                                serverUdpPorts.add(0, serverUdpPort)
+                            }
                             val token = result.optString("token", "")
                             val serverHost = parseServerHost(currentServer) ?: ""
                             synchronized(lock) {
                                 if (socketGeneration == gen) {
                                     deviceToken = token
                                     udpRegisterHost = serverHost
-                                    udpRegisterPort = serverUdpPort
+                                    udpRegisterPorts = serverUdpPorts
                                 }
                             }
                         } catch (e: Exception) {
@@ -409,7 +424,7 @@ object GoHomeSignalClient {
         connected = false
         deviceToken = ""
         udpRegisterHost = ""
-        udpRegisterPort = 0
+        udpRegisterPorts = emptyList()
         failAllPending("closed")
     }
 
@@ -432,7 +447,7 @@ object GoHomeSignalClient {
 
     private data class UDPRegisterTarget(
         val host: String,
-        val port: Int,
+        val ports: List<Int>,
         val deviceID: String,
         val token: String,
         val connected: Boolean

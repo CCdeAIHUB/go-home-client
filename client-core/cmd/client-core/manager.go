@@ -152,14 +152,14 @@ func (m *clientManager) dialAndAuth(ctx context.Context, server, authCode string
 		return nil, err
 	}
 
-	// 解析认证结果，获取 server_udp_port
+	// 解析认证结果，获取公网服务器 UDP 观测端口
 	var authResult protocol.DeviceAuthResult
-	if err := json.Unmarshal(raw, &authResult); err == nil && authResult.ServerUDPPort > 0 {
+	if err := json.Unmarshal(raw, &authResult); err == nil && len(serverUDPPorts(authResult)) > 0 {
 		m.mu.Lock()
 		m.server = server
 		m.authCode = authCode
 		m.mu.Unlock()
-		go m.registerUDPLoop(ctx, server, authResult.ServerUDPPort, authResult.Token)
+		go m.registerUDPLoop(ctx, server, serverUDPPorts(authResult), authResult.Token)
 	}
 
 	return rpc, nil
@@ -715,7 +715,23 @@ func virtualMAC(deviceID string) string {
 
 // registerUDPLoop 定期向公网服务器发送 UDP 注册探测包，
 // 让服务器发现本设备 NAT 映射后的公网端点。
-func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string, serverUDPPort int, token string) {
+func serverUDPPorts(authResult protocol.DeviceAuthResult) []int {
+	seen := map[int]bool{}
+	var ports []int
+	for _, port := range authResult.ServerUDPPorts {
+		if port < 1 || port > 65535 || seen[port] {
+			continue
+		}
+		seen[port] = true
+		ports = append(ports, port)
+	}
+	if authResult.ServerUDPPort > 0 && !seen[authResult.ServerUDPPort] {
+		ports = append([]int{authResult.ServerUDPPort}, ports...)
+	}
+	return ports
+}
+
+func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string, serverUDPPorts []int, token string) {
 	// 停止之前的注册循环
 	m.mu.Lock()
 	if m.registerStop != nil {
@@ -723,8 +739,14 @@ func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string
 	}
 	ctx, cancel := context.WithCancel(parentCtx)
 	m.registerStop = cancel
+	deviceID := m.deviceID
+	udpConn := m.udp
 	m.mu.Unlock()
 
+	registerUDPLoop(ctx, server, serverUDPPorts, deviceID, token, udpConn)
+}
+
+func registerUDPLoop(ctx context.Context, server string, serverUDPPorts []int, deviceID, token string, udpConn net.PacketConn) {
 	// 从 WebSocket URL 解析服务器主机名
 	wsURL := server
 	wsURL = strings.Replace(wsURL, "wss://", "https://", 1)
@@ -734,13 +756,20 @@ func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string
 		return
 	}
 	host := parsed.Hostname()
-	serverAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, fmt.Sprintf("%d", serverUDPPort)))
-	if err != nil {
+	var serverAddrs []*net.UDPAddr
+	for _, port := range serverUDPPorts {
+		serverAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+		if err != nil {
+			continue
+		}
+		serverAddrs = append(serverAddrs, serverAddr)
+	}
+	if len(serverAddrs) == 0 {
 		return
 	}
 
 	packet, err := tunnel.MarshalRegister(tunnel.Register{
-		DeviceID: m.deviceID,
+		DeviceID: deviceID,
 		Token:    token,
 	})
 	if err != nil {
@@ -750,9 +779,17 @@ func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
-	// 立即发送一次
-	if _, err := m.udp.WriteTo(packet, serverAddr); err != nil {
-		log.Printf("send UDP register: %v", err)
+	sendUDPRegisters := func() {
+		for _, serverAddr := range serverAddrs {
+			if _, err := udpConn.WriteTo(packet, serverAddr); err != nil {
+				log.Printf("send UDP register to %s: %v", serverAddr, err)
+			}
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		sendUDPRegisters()
+		time.Sleep(120 * time.Millisecond)
 	}
 
 	for {
@@ -760,9 +797,7 @@ func (m *clientManager) registerUDPLoop(parentCtx context.Context, server string
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := m.udp.WriteTo(packet, serverAddr); err != nil {
-				log.Printf("send UDP register: %v", err)
-			}
+			sendUDPRegisters()
 		}
 	}
 }
