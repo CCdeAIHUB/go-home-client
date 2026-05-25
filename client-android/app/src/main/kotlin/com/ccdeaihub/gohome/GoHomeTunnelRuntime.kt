@@ -45,11 +45,13 @@ object GoHomeTunnelRuntime {
     private const val FRAME_IPV4: Byte = 5
     private const val GCM_NONCE_SIZE = 12
     private const val PORT_PREDICTION_WINDOW = 16
+    private const val PUNCH_SOCKET_COUNT = 8
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
     private val lock = Object()
 
     private var socket: DatagramSocket? = null
+    private var punchSockets: MutableList<DatagramSocket> = mutableListOf()
     private var sessionID = ""
     private var sessionKey: ByteArray? = null
     private var peer: InetSocketAddress? = null
@@ -66,15 +68,24 @@ object GoHomeTunnelRuntime {
 
     fun prepare(deviceID: String): JSONObject {
         stop(null)
-        val prepared = DatagramSocket(0)
-        prepared.soTimeout = 450
+        val preparedSockets = mutableListOf<DatagramSocket>()
+        try {
+            repeat(PUNCH_SOCKET_COUNT) {
+                preparedSockets.add(DatagramSocket(0).apply { soTimeout = 120 })
+            }
+        } catch (error: Exception) {
+            preparedSockets.forEach { it.close() }
+            throw error
+        }
+        val prepared = preparedSockets.first()
         synchronized(lock) {
             socket = prepared
+            punchSockets = preparedSockets
             lastError = ""
             uploaded = 0
             downloaded = 0
         }
-        android.util.Log.i("GoHomeTunnel", "Prepared UDP socket localPort=${prepared.localPort}")
+        android.util.Log.i("GoHomeTunnel", "Prepared UDP sockets localPorts=${preparedSockets.map { it.localPort }}")
         return JSONObject()
             .put("udp_port", prepared.localPort)
             .put("client_virtual_mac", virtualMAC(deviceID))
@@ -82,7 +93,8 @@ object GoHomeTunnelRuntime {
 
     fun connect(activity: Activity, rawOffer: String, mode: String, virtualCIDR: String): JSONObject {
         val offer = JSONObject(rawOffer)
-        val currentSocket = synchronized(lock) { socket } ?: throw IllegalStateException("UDP socket is not prepared")
+        val currentSockets = synchronized(lock) { punchSockets.toList() }
+        if (currentSockets.isEmpty()) throw IllegalStateException("UDP socket is not prepared")
         val currentSessionID = offer.getString("session_id")
         val clientID = offer.getJSONObject("client").getString("device_id")
         val server = offer.getJSONObject("server")
@@ -117,11 +129,13 @@ object GoHomeTunnelRuntime {
         while (System.currentTimeMillis() < deadline) {
             val snapshot = candidates.toList()
             // 向所有候选端点发送 Hello（多路径打洞）
-            for (candidate in snapshot) {
-                send(currentSocket, candidate, hello)
+            for (sourceSocket in currentSockets) {
+                for (candidate in snapshot) {
+                    send(sourceSocket, candidate, hello)
+                }
             }
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
-            val packet = receive(currentSocket, untilNextHello)
+            val packet = receiveAny(currentSockets, untilNextHello)
             if (packet != null) {
                 try {
                     when (packetKind(packet.bytes)) {
@@ -132,7 +146,7 @@ object GoHomeTunnelRuntime {
                                 currentPeer = packet.source
                                 addCandidate(candidates, currentPeer)
                                 synchronized(lock) { peer = currentPeer }
-                                send(currentSocket, currentPeer, hello)
+                                send(packet.socket, currentPeer, hello)
                             }
                         }
                         PACKET_FRAME -> {
@@ -141,13 +155,16 @@ object GoHomeTunnelRuntime {
                                 framesSeen += 1
                                 android.util.Log.i("GoHomeTunnel", "Received UDP ready for session $currentSessionID from ${packet.source}")
                                 synchronized(lock) {
+                                    socket = packet.socket
+                                    punchSockets.filter { it !== packet.socket }.forEach { it.close() }
+                                    punchSockets = mutableListOf(packet.socket)
                                     peer = packet.source
                                     udpConnected = true
                                     running = true
                                 }
                                 val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
                                 startVpn(activity, ready, mode, virtualCIDR)
-                                startUDPLoop(currentSocket, currentKey, currentSessionID)
+                                startUDPLoop(packet.socket, currentKey, currentSessionID)
                                 startKeepaliveLoop()
                                 return readyToView(ready, mode, virtualCIDR)
                             }
@@ -181,7 +198,7 @@ object GoHomeTunnelRuntime {
 
     fun protectSocket(service: VpnService) {
         synchronized(lock) {
-            socket?.let {
+            punchSockets.forEach {
                 val ok = service.protect(it)
                 android.util.Log.i("GoHomeTunnel", "Protect UDP socket localPort=${it.localPort} result=$ok")
             }
@@ -190,13 +207,16 @@ object GoHomeTunnelRuntime {
 
     fun sendRegister(serverHost: String, serverUDPPort: Int, packet: ByteArray): Boolean {
         if (serverUDPPort <= 0) return false
-        val currentSocket = synchronized(lock) { socket } ?: return false
+        val currentSockets = synchronized(lock) { punchSockets.toList() }
+        if (currentSockets.isEmpty()) return false
         val address = InetAddress.getByName(serverHost)
         if (address !is Inet4Address) {
             throw IllegalArgumentException("server UDP endpoint must be IPv4")
         }
-        android.util.Log.i("GoHomeTunnel", "Send UDP register to $serverHost:$serverUDPPort from localPort=${currentSocket.localPort}")
-        send(currentSocket, InetSocketAddress(address, serverUDPPort), packet)
+        currentSockets.forEach {
+            android.util.Log.i("GoHomeTunnel", "Send UDP register to $serverHost:$serverUDPPort from localPort=${it.localPort}")
+            send(it, InetSocketAddress(address, serverUDPPort), packet)
+        }
         return true
     }
 
@@ -227,6 +247,8 @@ object GoHomeTunnelRuntime {
             peer = null
             sendSequence = 0
             replay = ReplayWindow()
+            punchSockets.forEach { it.close() }
+            punchSockets = mutableListOf()
             socket?.close()
             socket = null
             tunInput?.close()
@@ -389,10 +411,23 @@ object GoHomeTunnelRuntime {
         return try {
             targetSocket.receive(packet)
             val source = InetSocketAddress(packet.address, packet.port)
-            ReceivedPacket(buffer.copyOf(packet.length), source)
+            ReceivedPacket(buffer.copyOf(packet.length), source, targetSocket)
         } catch (_: SocketTimeoutException) {
             null
         }
+    }
+
+    private fun receiveAny(sources: List<DatagramSocket>, timeoutMillis: Int): ReceivedPacket? {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        while (System.currentTimeMillis() < deadline) {
+            for (source in sources) {
+                val remaining = (deadline - System.currentTimeMillis()).toInt()
+                if (remaining <= 0) return null
+                val packet = receive(source, min(remaining, 4))
+                if (packet != null) return packet
+            }
+        }
+        return null
     }
 
     private fun punchInterval(attempt: Int): Int {
@@ -595,7 +630,7 @@ object GoHomeTunnelRuntime {
         synchronized(lock) { lastError = message }
     }
 
-    private data class ReceivedPacket(val bytes: ByteArray, val source: InetSocketAddress)
+    private data class ReceivedPacket(val bytes: ByteArray, val source: InetSocketAddress, val socket: DatagramSocket)
     private data class Frame(val sessionID: String, val sequence: Long, val type: Byte, val payload: ByteArray)
 
     private class ReplayWindow {
