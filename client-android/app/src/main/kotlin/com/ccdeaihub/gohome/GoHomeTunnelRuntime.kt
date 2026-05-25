@@ -44,6 +44,7 @@ object GoHomeTunnelRuntime {
     private const val FRAME_PONG: Byte = 4
     private const val FRAME_IPV4: Byte = 5
     private const val GCM_NONCE_SIZE = 12
+    private const val PORT_PREDICTION_WINDOW = 16
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
     private val lock = Object()
@@ -98,7 +99,7 @@ object GoHomeTunnelRuntime {
         var currentPeer = candidates[0]
         android.util.Log.d("GoHomeTunnel", "UDP punch candidates: $candidates")
         val deadline = System.currentTimeMillis() + 15_000L
-        var waitMillis = 120
+        var attempt = 0
 
         synchronized(lock) {
             sessionID = currentSessionID
@@ -111,38 +112,45 @@ object GoHomeTunnelRuntime {
         }
 
         while (System.currentTimeMillis() < deadline) {
+            val snapshot = candidates.toList()
             // 向所有候选端点发送 Hello（多路径打洞）
-            for (candidate in candidates) {
+            for (candidate in snapshot) {
                 send(currentSocket, candidate, hello)
             }
-            val untilNextHello = min(waitMillis, (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
+            val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receive(currentSocket, untilNextHello)
             if (packet != null) {
-                when (packetKind(packet.bytes)) {
-                    PACKET_PROBE -> {
-                        if (controlJSON(packet.bytes).optString("session_id") == currentSessionID) {
-                            currentPeer = packet.source
-                            synchronized(lock) { peer = currentPeer }
-                        }
-                    }
-                    PACKET_FRAME -> {
-                        val frame = openFrame(currentKey, packet.bytes)
-                        if (frame.sessionID == currentSessionID && frame.type == FRAME_READY && replay.accept(frame.sequence)) {
-                            synchronized(lock) {
-                                peer = packet.source
-                                udpConnected = true
-                                running = true
+                try {
+                    when (packetKind(packet.bytes)) {
+                        PACKET_PROBE -> {
+                            if (controlJSON(packet.bytes).optString("session_id") == currentSessionID) {
+                                currentPeer = packet.source
+                                addCandidate(candidates, currentPeer)
+                                synchronized(lock) { peer = currentPeer }
+                                send(currentSocket, currentPeer, hello)
                             }
-                            val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
-                            startVpn(activity, ready, mode, virtualCIDR)
-                            startUDPLoop(currentSocket, currentKey, currentSessionID)
-                            startKeepaliveLoop()
-                            return readyToView(ready, mode, virtualCIDR)
+                        }
+                        PACKET_FRAME -> {
+                            val frame = openFrame(currentKey, packet.bytes)
+                            if (frame.sessionID == currentSessionID && frame.type == FRAME_READY && replay.accept(frame.sequence)) {
+                                synchronized(lock) {
+                                    peer = packet.source
+                                    udpConnected = true
+                                    running = true
+                                }
+                                val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
+                                startVpn(activity, ready, mode, virtualCIDR)
+                                startUDPLoop(currentSocket, currentKey, currentSessionID)
+                                startKeepaliveLoop()
+                                return readyToView(ready, mode, virtualCIDR)
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    android.util.Log.d("GoHomeTunnel", "ignore UDP packet during punch: ${e.message}")
                 }
             }
-            waitMillis = min(waitMillis + 120, 1_000)
+            attempt += 1
         }
         synchronized(lock) {
             lastError = "UDP direct tunnel handshake timed out"
@@ -375,6 +383,15 @@ object GoHomeTunnelRuntime {
         }
     }
 
+    private fun punchInterval(attempt: Int): Int {
+        return when {
+            attempt < 24 -> 35
+            attempt < 64 -> 100
+            attempt < 100 -> 250
+            else -> 500
+        }
+    }
+
     private fun packetKind(packet: ByteArray): Byte {
         if (packet.size < magic.size + 2 || !packet.copyOfRange(0, magic.size).contentEquals(magic)) {
             throw IllegalArgumentException("UDP packet magic is invalid")
@@ -478,8 +495,7 @@ object GoHomeTunnelRuntime {
             if (endpoint.isBlank()) return
             try {
                 val parsed = parseEndpoint(endpoint)
-                val key = "${parsed.address.hostAddress}:${parsed.port}"
-                if (seen.add(key)) out.add(parsed)
+                if (seen.add(candidateKey(parsed))) out.add(parsed)
             } catch (_: Exception) {}
         }
 
@@ -502,7 +518,28 @@ object GoHomeTunnelRuntime {
                 if (host.isNotBlank()) add("$host:$udpPort")
             }
         }
+        out.toList().forEach { endpoint ->
+            for (delta in 1..PORT_PREDICTION_WINDOW) {
+                if (endpoint.port + delta <= 65535) {
+                    add("${endpoint.address.hostAddress}:${endpoint.port + delta}")
+                }
+                if (endpoint.port - delta >= 1) {
+                    add("${endpoint.address.hostAddress}:${endpoint.port - delta}")
+                }
+            }
+        }
         return out
+    }
+
+    private fun addCandidate(candidates: MutableList<InetSocketAddress>, candidate: InetSocketAddress) {
+        val key = candidateKey(candidate)
+        if (candidates.none { candidateKey(it) == key }) {
+            candidates.add(candidate)
+        }
+    }
+
+    private fun candidateKey(candidate: InetSocketAddress): String {
+        return "${candidate.address.hostAddress}:${candidate.port}"
     }
 
     private fun endpointHost(endpoint: String): String {

@@ -17,6 +17,8 @@ import (
 	"gohome/shared/tunnel"
 )
 
+const candidatePortPredictionWindow = 16
+
 type punchClient struct {
 	conn     net.PacketConn
 	deviceID string
@@ -142,43 +144,59 @@ func peerCandidateEndpoints(peer protocol.PeerCandidate) []string {
 			}
 		}
 	}
+	base := append([]string(nil), out...)
+	for _, endpoint := range base {
+		addPortPredictionWindow(add, endpoint)
+	}
 	return out
 }
 
-func endpointHost(endpoint string) (string, bool) {
-	endpoint = strings.TrimSpace(endpoint)
-	if endpoint == "" {
-		return "", false
+func addPortPredictionWindow(add func(string), endpoint string) {
+	host, port, ok := endpointParts(endpoint)
+	if !ok {
+		return
 	}
-	host, _, err := net.SplitHostPort(endpoint)
-	if err != nil {
-		host = endpoint
+	for delta := 1; delta <= candidatePortPredictionWindow; delta++ {
+		if port+delta <= 65535 {
+			add(net.JoinHostPort(host, strconv.Itoa(port+delta)))
+		}
+		if port-delta >= 1 {
+			add(net.JoinHostPort(host, strconv.Itoa(port-delta)))
+		}
 	}
-	ip := net.ParseIP(strings.Trim(host, "[]"))
-	if ip == nil || ip.To4() == nil {
-		return "", false
-	}
-	return ip.To4().String(), true
 }
 
-func normalizeIPv4Endpoint(endpoint string) (string, bool) {
+func endpointHost(endpoint string) (string, bool) {
+	host, _, ok := endpointParts(endpoint)
+	return host, ok
+}
+
+func endpointParts(endpoint string) (string, int, bool) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
-		return "", false
+		return "", 0, false
 	}
 	host, portText, err := net.SplitHostPort(endpoint)
 	if err != nil {
-		return "", false
+		return "", 0, false
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	if ip == nil || ip.To4() == nil {
-		return "", false
+		return "", 0, false
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 1 || port > 65535 {
+		return "", 0, false
+	}
+	return ip.To4().String(), port, true
+}
+
+func normalizeIPv4Endpoint(endpoint string) (string, bool) {
+	host, port, ok := endpointParts(endpoint)
+	if !ok {
 		return "", false
 	}
-	return net.JoinHostPort(ip.To4().String(), strconv.Itoa(port)), true
+	return net.JoinHostPort(host, strconv.Itoa(port)), true
 }
 
 func (c *punchClient) Connect(waitCtx, runCtx context.Context) (tunnel.Ready, error) {
@@ -239,7 +257,7 @@ func (c *punchClient) punchLoop(ctx context.Context) {
 	for attempt := 0; ; attempt++ {
 		// 向所有候选端点发送 Hello
 		c.mu.Lock()
-		peers := c.peers
+		peers := append([]net.Addr(nil), c.peers...)
 		c.mu.Unlock()
 		for _, p := range peers {
 			if _, err := c.conn.WriteTo(c.hello, p); err != nil {
@@ -250,10 +268,7 @@ func (c *punchClient) punchLoop(ctx context.Context) {
 				c.statsMu.Unlock()
 			}
 		}
-		wait := time.Duration(attempt+1) * 120 * time.Millisecond
-		if wait > time.Second {
-			wait = time.Second
-		}
+		wait := punchInterval(attempt)
 		select {
 		case <-ctx.Done():
 			return
@@ -261,6 +276,19 @@ func (c *punchClient) punchLoop(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
+	}
+}
+
+func punchInterval(attempt int) time.Duration {
+	switch {
+	case attempt < 24:
+		return 35 * time.Millisecond
+	case attempt < 64:
+		return 100 * time.Millisecond
+	case attempt < 100:
+		return 250 * time.Millisecond
+	default:
+		return 500 * time.Millisecond
 	}
 }
 
@@ -390,6 +418,15 @@ func (c *punchClient) sendFrame(frameType byte, payload []byte) error {
 
 func (c *punchClient) setPeer(peer net.Addr) {
 	c.mu.Lock()
+	key := peer.String()
+	for _, existing := range c.peers {
+		if existing.String() == key {
+			c.peer = peer
+			c.mu.Unlock()
+			return
+		}
+	}
+	c.peers = append(c.peers, peer)
 	c.peer = peer
 	c.mu.Unlock()
 }
