@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,14 +24,14 @@ type punchClient struct {
 	key      []byte
 	hello    []byte
 
-	mu       sync.Mutex
-	peer     net.Addr
-	peers    []net.Addr // 候选端点列表，用于多路径打洞
-	sendSeq  uint64
-	replay   tunnel.ReplayWindow
-	ready    chan tunnel.Ready
-	pong     chan []byte
-	packets  chan []byte
+	mu      sync.Mutex
+	peer    net.Addr
+	peers   []net.Addr // 候选端点列表，用于多路径打洞
+	sendSeq uint64
+	replay  tunnel.ReplayWindow
+	ready   chan tunnel.Ready
+	pong    chan []byte
+	packets chan []byte
 
 	punchStop chan struct{}
 	punchOnce sync.Once
@@ -67,64 +68,11 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 	if err != nil {
 		return nil, err
 	}
-	// 优先使用服务器观察到的 NAT 映射端点
-	endpoint := offer.Server.Endpoint
-	if offer.Server.ObservedEndpoint != "" {
-		endpoint = offer.Server.ObservedEndpoint
-	}
-	peer, err := net.ResolveUDPAddr("udp", endpoint)
+	peers, err := resolvePeerCandidates(offer.Server)
 	if err != nil {
 		return nil, err
 	}
-	// 收集候选端点（observed + reported），用于多路径打洞
-	var peers []net.Addr
-	peers = append(peers, peer)
-	if offer.Server.ObservedEndpoint != "" && offer.Server.Endpoint != "" && offer.Server.ObservedEndpoint != offer.Server.Endpoint {
-		if alt, err := net.ResolveUDPAddr("udp", offer.Server.Endpoint); err == nil {
-			peers = append(peers, alt)
-		}
-	}
-	// 如果有 UDP 端口信息，尝试用 WebSocket remote IP + 报告的 UDP 端口
-	if offer.Server.UDPPort > 0 && offer.Server.Endpoint != "" {
-		host, _, splitErr := net.SplitHostPort(offer.Server.Endpoint)
-		if splitErr == nil {
-			reportedUDP := net.JoinHostPort(host, strconv.Itoa(offer.Server.UDPPort))
-			if reportedUDP != endpoint && reportedUDP != offer.Server.Endpoint {
-				if alt, err := net.ResolveUDPAddr("udp", reportedUDP); err == nil {
-					// 避免重复
-					dup := false
-					for _, p := range peers {
-						if p.String() == alt.String() {
-							dup = true
-							break
-						}
-					}
-					if !dup {
-						peers = append(peers, alt)
-					}
-				}
-			}
-		}
-	}
-	// 使用 WebSocket 源地址 IP + 报告的 UDP 端口作为额外候选
-	if offer.Server.RemoteAddr != "" && offer.Server.UDPPort > 0 {
-		host, _, splitErr := net.SplitHostPort(offer.Server.RemoteAddr)
-		if splitErr == nil {
-			remoteUDP := net.JoinHostPort(host, strconv.Itoa(offer.Server.UDPPort))
-			dup := false
-			for _, p := range peers {
-				if p.String() == remoteUDP {
-					dup = true
-					break
-				}
-			}
-			if !dup {
-				if alt, err := net.ResolveUDPAddr("udp", remoteUDP); err == nil {
-					peers = append(peers, alt)
-				}
-			}
-		}
-	}
+	peer := peers[0]
 	log.Printf("UDP punch candidates for session %s: %v", offer.SessionID, peers)
 	return &punchClient{
 		conn:      conn,
@@ -139,6 +87,98 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 		packets:   make(chan []byte, 64),
 		punchStop: make(chan struct{}),
 	}, nil
+}
+
+func resolvePeerCandidates(peer protocol.PeerCandidate) ([]net.Addr, error) {
+	endpoints := peerCandidateEndpoints(peer)
+	if len(endpoints) == 0 {
+		return nil, errors.New("peer has no usable IPv4 UDP candidate")
+	}
+	var out []net.Addr
+	var lastErr error
+	seen := map[string]bool{}
+	for _, endpoint := range endpoints {
+		addr, err := net.ResolveUDPAddr("udp4", endpoint)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		key := addr.String()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, addr)
+	}
+	if len(out) == 0 {
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, errors.New("peer candidates could not be resolved")
+	}
+	return out, nil
+}
+
+func peerCandidateEndpoints(peer protocol.PeerCandidate) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(endpoint string) {
+		normalized, ok := normalizeIPv4Endpoint(endpoint)
+		if !ok || seen[normalized] {
+			return
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+	for _, endpoint := range peer.Candidates {
+		add(endpoint)
+	}
+	add(peer.ObservedEndpoint)
+	add(peer.Endpoint)
+	if peer.UDPPort > 0 {
+		for _, endpoint := range []string{peer.ObservedEndpoint, peer.Endpoint, peer.RemoteAddr} {
+			if host, ok := endpointHost(endpoint); ok {
+				add(net.JoinHostPort(host, strconv.Itoa(peer.UDPPort)))
+			}
+		}
+	}
+	return out
+}
+
+func endpointHost(endpoint string) (string, bool) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", false
+	}
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		host = endpoint
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || ip.To4() == nil {
+		return "", false
+	}
+	return ip.To4().String(), true
+}
+
+func normalizeIPv4Endpoint(endpoint string) (string, bool) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return "", false
+	}
+	host, portText, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return "", false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil || ip.To4() == nil {
+		return "", false
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", false
+	}
+	return net.JoinHostPort(ip.To4().String(), strconv.Itoa(port)), true
 }
 
 func (c *punchClient) Connect(waitCtx, runCtx context.Context) (tunnel.Ready, error) {

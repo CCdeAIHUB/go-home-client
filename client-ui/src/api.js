@@ -78,6 +78,10 @@ const androidSignalAPI = {
     // Step 2: Prepare UDP tunnel
     const prepared = readAndroidJSON(window.GoHomeNative.prepareTunnel(window.GoHomeNative.deviceId()))
     if (prepared.error) throw new Error(prepared.error)
+    if (window.GoHomeNative.registerTunnelEndpoint) {
+      const registered = readAndroidJSON(window.GoHomeNative.registerTunnelEndpoint())
+      if (registered.error) console.warn('UDP endpoint registration failed:', registered.error)
+    }
 
     // Step 3: Request hole punch via signal server
     const offer = await androidRPC('p2p.hole_punch_req', {

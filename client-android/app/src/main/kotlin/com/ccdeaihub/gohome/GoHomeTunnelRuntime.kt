@@ -93,44 +93,9 @@ object GoHomeTunnelRuntime {
                 .put("client_device_id", clientID)
                 .put("encrypted_session_key", Base64.encodeToString(encryptedKey, Base64.NO_WRAP))
         )
-        // 优先使用服务器观察到的 NAT 映射端点
-        val endpointStr = server.optString("observed_endpoint", "")
-            .ifBlank { server.getString("endpoint") }
-        var currentPeer = parseEndpoint(endpointStr)
-        // 收集候选端点，用于多路径打洞
-        val candidates = mutableListOf(currentPeer)
-        val reportedEndpoint = server.optString("endpoint", "")
-        if (reportedEndpoint.isNotBlank() && reportedEndpoint != endpointStr) {
-            try { candidates.add(parseEndpoint(reportedEndpoint)) } catch (_: Exception) {}
-        }
-        // 尝试用 WebSocket remote IP + 报告的 UDP 端口
-        val udpPort = server.optInt("udp_port", 0)
-        if (udpPort > 0 && reportedEndpoint.isNotBlank()) {
-            val colonIdx = reportedEndpoint.lastIndexOf(':')
-            if (colonIdx > 0) {
-                val host = reportedEndpoint.substring(0, colonIdx)
-                val altEndpoint = "$host:$udpPort"
-                if (altEndpoint != endpointStr && altEndpoint != reportedEndpoint) {
-                    try { candidates.add(parseEndpoint(altEndpoint)) } catch (_: Exception) {}
-                }
-            }
-        }
-        // 使用 WebSocket 源地址 IP + 报告的 UDP 端口作为额外候选
-        val remoteAddr = server.optString("remote_addr", "")
-        if (udpPort > 0 && remoteAddr.isNotBlank()) {
-            val colonIdx = remoteAddr.lastIndexOf(':')
-            if (colonIdx > 0) {
-                val host = remoteAddr.substring(0, colonIdx)
-                val remoteUDP = "$host:$udpPort"
-                var isDup = false
-                for (c in candidates) {
-                    if (c.toString() == remoteUDP) { isDup = true; break }
-                }
-                if (!isDup) {
-                    try { candidates.add(parseEndpoint(remoteUDP)) } catch (_: Exception) {}
-                }
-            }
-        }
+        val candidates = peerCandidates(server)
+        if (candidates.isEmpty()) throw IllegalStateException("home server has no usable IPv4 UDP candidate")
+        var currentPeer = candidates[0]
         android.util.Log.d("GoHomeTunnel", "UDP punch candidates: $candidates")
         val deadline = System.currentTimeMillis() + 15_000L
         var waitMillis = 120
@@ -202,6 +167,17 @@ object GoHomeTunnelRuntime {
         synchronized(lock) {
             socket?.let { service.protect(it) }
         }
+    }
+
+    fun sendRegister(serverHost: String, serverUDPPort: Int, packet: ByteArray): Boolean {
+        if (serverUDPPort <= 0) return false
+        val currentSocket = synchronized(lock) { socket } ?: return false
+        val address = InetAddress.getByName(serverHost)
+        if (address !is Inet4Address) {
+            throw IllegalArgumentException("server UDP endpoint must be IPv4")
+        }
+        send(currentSocket, InetSocketAddress(address, serverUDPPort), packet)
+        return true
     }
 
     fun status(): JSONObject {
@@ -495,10 +471,57 @@ object GoHomeTunnelRuntime {
         return InetAddress.getByAddress(bytes).hostAddress ?: throw IllegalArgumentException("virtual client IP is invalid")
     }
 
+    private fun peerCandidates(peer: JSONObject): MutableList<InetSocketAddress> {
+        val out = mutableListOf<InetSocketAddress>()
+        val seen = mutableSetOf<String>()
+        fun add(endpoint: String) {
+            if (endpoint.isBlank()) return
+            try {
+                val parsed = parseEndpoint(endpoint)
+                val key = "${parsed.address.hostAddress}:${parsed.port}"
+                if (seen.add(key)) out.add(parsed)
+            } catch (_: Exception) {}
+        }
+
+        val serverList = peer.optJSONArray("candidates")
+        if (serverList != null) {
+            for (index in 0 until serverList.length()) {
+                add(serverList.optString(index, ""))
+            }
+        }
+        val observedEndpoint = peer.optString("observed_endpoint", "")
+        val reportedEndpoint = peer.optString("endpoint", "")
+        val remoteAddr = peer.optString("remote_addr", "")
+        add(observedEndpoint)
+        add(reportedEndpoint)
+
+        val udpPort = peer.optInt("udp_port", 0)
+        if (udpPort > 0) {
+            listOf(observedEndpoint, reportedEndpoint, remoteAddr).forEach { endpoint ->
+                val host = endpointHost(endpoint)
+                if (host.isNotBlank()) add("$host:$udpPort")
+            }
+        }
+        return out
+    }
+
+    private fun endpointHost(endpoint: String): String {
+        val delimiter = endpoint.lastIndexOf(':')
+        if (delimiter <= 0) return ""
+        val host = endpoint.substring(0, delimiter).trim('[', ']')
+        val address = runCatching { InetAddress.getByName(host) }.getOrNull()
+        return if (address is Inet4Address) address.hostAddress ?: "" else ""
+    }
+
     private fun parseEndpoint(endpoint: String): InetSocketAddress {
         val delimiter = endpoint.lastIndexOf(':')
-        if (delimiter <= 0) throw IllegalArgumentException("home server endpoint is invalid")
-        return InetSocketAddress(endpoint.substring(0, delimiter), endpoint.substring(delimiter + 1).toInt())
+        if (delimiter <= 0) throw IllegalArgumentException("endpoint is invalid")
+        val port = endpoint.substring(delimiter + 1).toInt()
+        if (port !in 1..65535) throw IllegalArgumentException("endpoint port is invalid")
+        val host = endpoint.substring(0, delimiter).trim('[', ']')
+        val address = InetAddress.getByName(host)
+        if (address !is Inet4Address) throw IllegalArgumentException("endpoint must be IPv4")
+        return InetSocketAddress(address, port)
     }
 
     private fun virtualMAC(deviceID: String): String {

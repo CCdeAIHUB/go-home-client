@@ -8,9 +8,6 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
 import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -28,7 +25,6 @@ object GoHomeSignalClient {
     private const val RPC_TIMEOUT_S = 12L
     private const val HEARTBEAT_MS = 25_000L
     private const val RECONNECT_MS = 1_800L
-    private const val UDP_REGISTER_MS = 15_000L
 
     // GHU1 magic bytes for UDP registration packets
     private val MAGIC = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
@@ -45,6 +41,9 @@ object GoHomeSignalClient {
     private var server = ""
     private var authCode = ""
     private var deviceId = ""
+    private var deviceToken = ""
+    private var udpRegisterHost = ""
+    private var udpRegisterPort = 0
     private var connected = false
     private var intentionalClose = false
     private var lastError = ""
@@ -53,7 +52,6 @@ object GoHomeSignalClient {
     private val seq = AtomicInteger(0)
     private val pending = ConcurrentHashMap<String, (ok: Boolean, data: String) -> Unit>()
     private var heartbeatThread: Thread? = null
-    private var udpRegisterThread: Thread? = null
 
     // 服务器推送事件回调（通知 WebView 刷新）
     var onEventCallback: ((action: String, params: String) -> Unit)? = null
@@ -67,6 +65,9 @@ object GoHomeSignalClient {
             this.server = server
             this.authCode = authCode
             this.deviceId = deviceId
+            this.deviceToken = ""
+            this.udpRegisterHost = ""
+            this.udpRegisterPort = 0
             this.intentionalClose = false
             this.lastError = ""
             this.socketGeneration += 1
@@ -144,6 +145,37 @@ object GoHomeSignalClient {
             .toString()
     }
 
+    fun registerTunnelEndpoint(): String {
+        val target = synchronized(lock) {
+            UDPRegisterTarget(udpRegisterHost, udpRegisterPort, deviceId, deviceToken, connected)
+        }
+        if (!target.connected) return """{"error":"not connected"}"""
+        if (target.host.isBlank() || target.port <= 0) return """{"error":"server UDP discovery is unavailable"}"""
+        if (target.deviceID.isBlank() || target.token.isBlank()) return """{"error":"device token is unavailable"}"""
+        val packet = buildRegisterPacket(target.deviceID, target.token)
+            ?: return """{"error":"build register packet failed"}"""
+        var sent = 0
+        var lastError = ""
+        repeat(4) { index ->
+            try {
+                if (GoHomeTunnelRuntime.sendRegister(target.host, target.port, packet)) {
+                    sent += 1
+                }
+            } catch (e: Exception) {
+                lastError = e.message ?: "send UDP register failed"
+                Log.w(TAG, "register prepared UDP endpoint", e)
+            }
+            if (index < 3) {
+                try { Thread.sleep(120) } catch (_: InterruptedException) { return@repeat }
+            }
+        }
+        return if (sent > 0) {
+            JSONObject().put("ok", true).put("sent", sent).toString()
+        } else {
+            """{"error":${JSONObject.quote(lastError.ifBlank { "send UDP register failed" })}}"""
+        }
+    }
+
     // ── Internal ──
 
     private fun doConnect(gen: Int, latch: CountDownLatch, out: Array<String>) {
@@ -176,8 +208,13 @@ object GoHomeSignalClient {
                             val result = JSONObject(data)
                             val serverUdpPort = result.optInt("server_udp_port", 0)
                             val token = result.optString("token", "")
-                            if (serverUdpPort > 0 && token.isNotEmpty()) {
-                                startUDPRegistration(gen, currentServer, serverUdpPort, currentDev, token)
+                            val serverHost = parseServerHost(currentServer) ?: ""
+                            synchronized(lock) {
+                                if (socketGeneration == gen) {
+                                    deviceToken = token
+                                    udpRegisterHost = serverHost
+                                    udpRegisterPort = serverUdpPort
+                                }
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "parse auth result", e)
@@ -295,7 +332,6 @@ object GoHomeSignalClient {
             if (socketGeneration != gen) return
             connected = false
             stopHeartbeat()
-            stopUDPRegistration()
             failAllPending("disconnected")
         }
         if (!synchronized(lock) { intentionalClose }) {
@@ -325,43 +361,6 @@ object GoHomeSignalClient {
     }
 
     // ── UDP Registration (NAT Endpoint Discovery) ──
-
-    private fun startUDPRegistration(gen: Int, serverURL: String, serverUDPPort: Int, deviceID: String, token: String) {
-        stopUDPRegistration()
-        udpRegisterThread = thread(name = "go-home-udp-reg", isDaemon = true) {
-            try {
-                // Parse server host from WebSocket URL
-                val host = parseServerHost(serverURL) ?: return@thread
-                val serverAddr = InetAddress.getByName(host)
-                val registerPacket = buildRegisterPacket(deviceID, token) ?: return@thread
-
-                // Send immediately
-                sendUDPRegister(serverAddr, serverUDPPort, registerPacket)
-
-                while (!Thread.interrupted()) {
-                    Thread.sleep(UDP_REGISTER_MS)
-                    if (synchronized(lock) { socketGeneration != gen || !connected }) return@thread
-                    sendUDPRegister(serverAddr, serverUDPPort, registerPacket)
-                }
-            } catch (_: InterruptedException) { }
-            catch (e: Exception) { Log.w(TAG, "UDP register error", e) }
-        }
-    }
-
-    private fun stopUDPRegistration() {
-        udpRegisterThread?.interrupt()
-        udpRegisterThread = null
-    }
-
-    private fun sendUDPRegister(addr: InetAddress, port: Int, packet: ByteArray) {
-        try {
-            val socket = DatagramSocket()
-            socket.send(DatagramPacket(packet, packet.size, addr, port))
-            socket.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "send UDP register", e)
-        }
-    }
 
     private fun buildRegisterPacket(deviceID: String, token: String): ByteArray? {
         try {
@@ -405,10 +404,12 @@ object GoHomeSignalClient {
 
     private fun closeInternal() {
         stopHeartbeat()
-        stopUDPRegistration()
         try { ws?.close(1000, "bye") } catch (_: Exception) {}
         ws = null
         connected = false
+        deviceToken = ""
+        udpRegisterHost = ""
+        udpRegisterPort = 0
         failAllPending("closed")
     }
 
@@ -428,4 +429,12 @@ object GoHomeSignalClient {
         val port = if (uri.port == -1) "" else ":${uri.port}"
         return "$scheme://${uri.host}$port$path"
     }
+
+    private data class UDPRegisterTarget(
+        val host: String,
+        val port: Int,
+        val deviceID: String,
+        val token: String,
+        val connected: Boolean
+    )
 }

@@ -193,6 +193,18 @@ class MainActivity : Activity() {
             return result[0]
         }
 
+        @JavascriptInterface
+        fun registerTunnelEndpoint(): String {
+            val result = arrayOf<String>("")
+            val latch = CountDownLatch(1)
+            Thread {
+                result[0] = GoHomeSignalClient.registerTunnelEndpoint()
+                latch.countDown()
+            }.start()
+            latch.await(5, TimeUnit.SECONDS)
+            return result[0]
+        }
+
         /**
          * Connect tunnel asynchronously.
          * Returns a callback ID immediately, then posts the result via
