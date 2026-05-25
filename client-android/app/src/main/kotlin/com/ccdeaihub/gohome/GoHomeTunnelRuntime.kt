@@ -74,6 +74,7 @@ object GoHomeTunnelRuntime {
             uploaded = 0
             downloaded = 0
         }
+        android.util.Log.i("GoHomeTunnel", "Prepared UDP socket localPort=${prepared.localPort}")
         return JSONObject()
             .put("udp_port", prepared.localPort)
             .put("client_virtual_mac", virtualMAC(deviceID))
@@ -97,9 +98,11 @@ object GoHomeTunnelRuntime {
         val candidates = peerCandidates(server)
         if (candidates.isEmpty()) throw IllegalStateException("home server has no usable IPv4 UDP candidate")
         var currentPeer = candidates[0]
-        android.util.Log.d("GoHomeTunnel", "UDP punch candidates: $candidates")
+        android.util.Log.i("GoHomeTunnel", "UDP punch candidates for session $currentSessionID: $candidates")
         val deadline = System.currentTimeMillis() + 15_000L
         var attempt = 0
+        var probesSeen = 0
+        var framesSeen = 0
 
         synchronized(lock) {
             sessionID = currentSessionID
@@ -124,6 +127,8 @@ object GoHomeTunnelRuntime {
                     when (packetKind(packet.bytes)) {
                         PACKET_PROBE -> {
                             if (controlJSON(packet.bytes).optString("session_id") == currentSessionID) {
+                                probesSeen += 1
+                                android.util.Log.i("GoHomeTunnel", "Received UDP probe for session $currentSessionID from ${packet.source}")
                                 currentPeer = packet.source
                                 addCandidate(candidates, currentPeer)
                                 synchronized(lock) { peer = currentPeer }
@@ -133,6 +138,8 @@ object GoHomeTunnelRuntime {
                         PACKET_FRAME -> {
                             val frame = openFrame(currentKey, packet.bytes)
                             if (frame.sessionID == currentSessionID && frame.type == FRAME_READY && replay.accept(frame.sequence)) {
+                                framesSeen += 1
+                                android.util.Log.i("GoHomeTunnel", "Received UDP ready for session $currentSessionID from ${packet.source}")
                                 synchronized(lock) {
                                     peer = packet.source
                                     udpConnected = true
@@ -153,8 +160,9 @@ object GoHomeTunnelRuntime {
             attempt += 1
         }
         synchronized(lock) {
-            lastError = "UDP direct tunnel handshake timed out"
+            lastError = "UDP direct tunnel handshake timed out (attempts=$attempt probes=$probesSeen frames=$framesSeen sent=$uploaded received=$downloaded)"
         }
+        android.util.Log.w("GoHomeTunnel", lastError)
         throw IllegalStateException(lastError)
     }
 
@@ -173,7 +181,10 @@ object GoHomeTunnelRuntime {
 
     fun protectSocket(service: VpnService) {
         synchronized(lock) {
-            socket?.let { service.protect(it) }
+            socket?.let {
+                val ok = service.protect(it)
+                android.util.Log.i("GoHomeTunnel", "Protect UDP socket localPort=${it.localPort} result=$ok")
+            }
         }
     }
 
@@ -184,6 +195,7 @@ object GoHomeTunnelRuntime {
         if (address !is Inet4Address) {
             throw IllegalArgumentException("server UDP endpoint must be IPv4")
         }
+        android.util.Log.i("GoHomeTunnel", "Send UDP register to $serverHost:$serverUDPPort from localPort=${currentSocket.localPort}")
         send(currentSocket, InetSocketAddress(address, serverUDPPort), packet)
         return true
     }

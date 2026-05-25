@@ -1,5 +1,6 @@
 package com.ccdeaihub.gohome
 
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
@@ -9,6 +10,13 @@ class GoHomeVpnService : VpnService() {
     private var tunnel: ParcelFileDescriptor? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        GoHomeTunnelRuntime.protectSocket(this)
+        if (intent?.action == ACTION_PROTECT_SOCKET) {
+            Log.i(TAG, "Protected UDP tunnel socket before handshake")
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
         val homeCidr = intent?.getStringExtra(EXTRA_HOME_CIDR)
         val virtualAddress = intent?.getStringExtra(EXTRA_VIRTUAL_ADDRESS)
         if (homeCidr.isNullOrBlank() || virtualAddress.isNullOrBlank()) {
@@ -21,9 +29,6 @@ class GoHomeVpnService : VpnService() {
             stopSelf()
             return START_NOT_STICKY
         }
-
-        // Protect the UDP socket so it bypasses the VPN
-        GoHomeTunnelRuntime.protectSocket(this)
 
         // Close old tunnel if any
         tunnel?.close()
@@ -68,8 +73,14 @@ class GoHomeVpnService : VpnService() {
 
     companion object {
         private const val TAG = "GoHomeVpn"
+        private const val ACTION_PROTECT_SOCKET = "com.ccdeaihub.gohome.PROTECT_SOCKET"
         const val EXTRA_HOME_CIDR = "home_cidr"
         const val EXTRA_VIRTUAL_ADDRESS = "virtual_address"
+
+        fun protectTunnelSocket(context: Context) {
+            val intent = Intent(context, GoHomeVpnService::class.java).setAction(ACTION_PROTECT_SOCKET)
+            context.startService(intent)
+        }
 
         private fun splitCidr(cidr: String): Pair<String, Int>? {
             val parts = cidr.split("/", limit = 2)

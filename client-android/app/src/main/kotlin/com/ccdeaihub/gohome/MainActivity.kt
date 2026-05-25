@@ -183,7 +183,22 @@ class MainActivity : Activity() {
             val latch = CountDownLatch(1)
             Thread {
                 try {
-                    result[0] = GoHomeTunnelRuntime.prepare(deviceID).toString()
+                    val prepared = GoHomeTunnelRuntime.prepare(deviceID)
+                    val protectLatch = CountDownLatch(1)
+                    activity.runOnUiThread {
+                        try {
+                            GoHomeVpnService.protectTunnelSocket(activity)
+                            prepared.put("socket_protected", true)
+                        } catch (e: Exception) {
+                            Log.w("GoHome", "Failed to protect UDP socket before handshake", e)
+                            prepared.put("socket_protected", false)
+                            prepared.put("protect_error", e.message ?: "protect failed")
+                        } finally {
+                            protectLatch.countDown()
+                        }
+                    }
+                    protectLatch.await(3, TimeUnit.SECONDS)
+                    result[0] = prepared.toString()
                 } catch (e: Exception) {
                     result[0] = """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
                 }
