@@ -45,6 +45,9 @@ object GoHomeTunnelRuntime {
     private const val FRAME_IPV4: Byte = 5
     private const val GCM_NONCE_SIZE = 12
     private const val PORT_PREDICTION_WINDOW = 16
+    private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
+    private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 192
+    private const val PUNCH_TIMEOUT_MS = 25_000L
     private const val PUNCH_SOCKET_COUNT = 8
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
@@ -107,14 +110,15 @@ object GoHomeTunnelRuntime {
                 .put("client_device_id", clientID)
                 .put("encrypted_session_key", Base64.encodeToString(encryptedKey, Base64.NO_WRAP))
         )
-        val candidates = peerCandidates(server)
+        val candidates = peerBaseCandidates(server)
         if (candidates.isEmpty()) throw IllegalStateException("home server has no usable IPv4 UDP candidate")
         var currentPeer = candidates[0]
-        android.util.Log.i("GoHomeTunnel", "UDP punch candidates for session $currentSessionID: $candidates")
-        val deadline = System.currentTimeMillis() + 15_000L
+        android.util.Log.i("GoHomeTunnel", "UDP punch base candidates for session $currentSessionID: $candidates")
+        val deadline = System.currentTimeMillis() + PUNCH_TIMEOUT_MS
         var attempt = 0
         var probesSeen = 0
         var framesSeen = 0
+        var lastWindow = -1
 
         synchronized(lock) {
             sessionID = currentSessionID
@@ -127,7 +131,15 @@ object GoHomeTunnelRuntime {
         }
 
         while (System.currentTimeMillis() < deadline) {
-            val snapshot = candidates.toList()
+            val snapshot = punchCandidateBatch(candidates, attempt)
+            val window = punchPredictionWindow(attempt)
+            if (window != lastWindow) {
+                val total = expandCandidates(candidates, window).size
+                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sockets=${currentSockets.size}")
+                lastWindow = window
+            }
+            // Send Hello packets from every punch socket to the current batch.
+            for (sourceSocket in currentSockets) {
             // 向所有候选端点发送 Hello（多路径打洞）
             for (sourceSocket in currentSockets) {
                 for (candidate in snapshot) {
@@ -177,7 +189,7 @@ object GoHomeTunnelRuntime {
             attempt += 1
         }
         synchronized(lock) {
-            lastError = "UDP direct tunnel handshake timed out (attempts=$attempt probes=$probesSeen frames=$framesSeen sent=$uploaded received=$downloaded)"
+            lastError = "UDP direct tunnel handshake timed out (attempts=$attempt probes=$probesSeen frames=$framesSeen sent=$uploaded received=$downloaded maxWindow=$AGGRESSIVE_PORT_PREDICTION_WINDOW)"
         }
         android.util.Log.w("GoHomeTunnel", lastError)
         throw IllegalStateException(lastError)
@@ -535,7 +547,7 @@ object GoHomeTunnelRuntime {
         return InetAddress.getByAddress(bytes).hostAddress ?: throw IllegalArgumentException("virtual client IP is invalid")
     }
 
-    private fun peerCandidates(peer: JSONObject): MutableList<InetSocketAddress> {
+    private fun peerBaseCandidates(peer: JSONObject): MutableList<InetSocketAddress> {
         val out = mutableListOf<InetSocketAddress>()
         val seen = mutableSetOf<String>()
         fun add(endpoint: String) {
@@ -565,13 +577,51 @@ object GoHomeTunnelRuntime {
                 if (host.isNotBlank()) add("$host:$udpPort")
             }
         }
+        return out
+    }
+
+    private fun punchCandidateBatch(base: List<InetSocketAddress>, attempt: Int): List<InetSocketAddress> {
+        val candidates = expandCandidates(base, punchPredictionWindow(attempt))
+        if (candidates.size <= MAX_PUNCH_TARGETS_PER_ATTEMPT) return candidates
+        val baseCount = min(base.size, MAX_PUNCH_TARGETS_PER_ATTEMPT)
+        val out = candidates.take(baseCount).toMutableList()
+        val room = MAX_PUNCH_TARGETS_PER_ATTEMPT - out.size
+        if (room <= 0) return out
+        val rotating = candidates.drop(baseCount)
+        if (rotating.isEmpty()) return out
+        val offset = (attempt * room) % rotating.size
+        repeat(room) { index ->
+            out.add(rotating[(offset + index) % rotating.size])
+        }
+        return out
+    }
+
+    private fun punchPredictionWindow(attempt: Int): Int {
+        return when {
+            attempt < 12 -> PORT_PREDICTION_WINDOW
+            attempt < 32 -> 64
+            attempt < 60 -> 256
+            else -> AGGRESSIVE_PORT_PREDICTION_WINDOW
+        }
+    }
+
+    private fun expandCandidates(base: List<InetSocketAddress>, window: Int): List<InetSocketAddress> {
+        val out = mutableListOf<InetSocketAddress>()
+        val seen = mutableSetOf<String>()
+        fun add(candidate: InetSocketAddress) {
+            val address = candidate.address as? Inet4Address ?: return
+            if (candidate.port !in 1..65535) return
+            val normalized = InetSocketAddress(address, candidate.port)
+            if (seen.add(candidateKey(normalized))) out.add(normalized)
+        }
+        base.forEach(::add)
         out.toList().forEach { endpoint ->
-            for (delta in 1..PORT_PREDICTION_WINDOW) {
+            for (delta in 1..window) {
                 if (endpoint.port + delta <= 65535) {
-                    add("${endpoint.address.hostAddress}:${endpoint.port + delta}")
+                    add(InetSocketAddress(endpoint.address, endpoint.port + delta))
                 }
                 if (endpoint.port - delta >= 1) {
-                    add("${endpoint.address.hostAddress}:${endpoint.port - delta}")
+                    add(InetSocketAddress(endpoint.address, endpoint.port - delta))
                 }
             }
         }

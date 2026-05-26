@@ -17,7 +17,11 @@ import (
 	"gohome/shared/tunnel"
 )
 
-const candidatePortPredictionWindow = 16
+const (
+	candidatePortPredictionWindow  = 16
+	aggressivePortPredictionWindow = 512
+	maxPunchCandidatesPerAttempt   = 192
+)
 
 type punchClient struct {
 	conn     net.PacketConn
@@ -70,12 +74,12 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 	if err != nil {
 		return nil, err
 	}
-	peers, err := resolvePeerCandidates(offer.Server)
+	peers, err := resolvePeerEndpointList(peerBaseCandidateEndpoints(offer.Server))
 	if err != nil {
 		return nil, err
 	}
 	peer := peers[0]
-	log.Printf("UDP punch candidates for session %s: %v", offer.SessionID, peers)
+	log.Printf("UDP punch base candidates for session %s: %v", offer.SessionID, peers)
 	return &punchClient{
 		conn:      conn,
 		deviceID:  deviceID,
@@ -92,7 +96,10 @@ func newPunchClient(conn net.PacketConn, deviceID string, offer protocol.HolePun
 }
 
 func resolvePeerCandidates(peer protocol.PeerCandidate) ([]net.Addr, error) {
-	endpoints := peerCandidateEndpoints(peer)
+	return resolvePeerEndpointList(peerCandidateEndpoints(peer))
+}
+
+func resolvePeerEndpointList(endpoints []string) ([]net.Addr, error) {
 	if len(endpoints) == 0 {
 		return nil, errors.New("peer has no usable IPv4 UDP candidate")
 	}
@@ -121,7 +128,104 @@ func resolvePeerCandidates(peer protocol.PeerCandidate) ([]net.Addr, error) {
 	return out, nil
 }
 
+func punchAddrBatch(base []net.Addr, attempt int, maxBatch int) []net.Addr {
+	window := punchPredictionWindow(attempt)
+	candidates := expandAddrCandidates(base, window)
+	if maxBatch <= 0 || len(candidates) <= maxBatch {
+		return candidates
+	}
+	baseCount := len(base)
+	if baseCount > maxBatch {
+		baseCount = maxBatch
+	}
+	out := append([]net.Addr(nil), candidates[:baseCount]...)
+	room := maxBatch - len(out)
+	rotating := candidates[baseCount:]
+	if room <= 0 || len(rotating) == 0 {
+		return out
+	}
+	offset := (attempt * room) % len(rotating)
+	for i := 0; i < room; i++ {
+		out = append(out, rotating[(offset+i)%len(rotating)])
+	}
+	return out
+}
+
+func punchPredictionWindow(attempt int) int {
+	switch {
+	case attempt < 12:
+		return candidatePortPredictionWindow
+	case attempt < 32:
+		return 64
+	case attempt < 60:
+		return 256
+	default:
+		return aggressivePortPredictionWindow
+	}
+}
+
+func expandAddrCandidates(base []net.Addr, window int) []net.Addr {
+	var out []net.Addr
+	seen := map[string]bool{}
+	add := func(addr net.Addr) {
+		udpAddr, ok := addr.(*net.UDPAddr)
+		if !ok || udpAddr.IP == nil || udpAddr.IP.To4() == nil || udpAddr.Port < 1 || udpAddr.Port > 65535 {
+			return
+		}
+		normalized := &net.UDPAddr{IP: udpAddr.IP.To4(), Port: udpAddr.Port}
+		key := normalized.String()
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, normalized)
+	}
+	for _, addr := range base {
+		add(addr)
+	}
+	for _, addr := range append([]net.Addr(nil), out...) {
+		udpAddr := addr.(*net.UDPAddr)
+		for delta := 1; delta <= window; delta++ {
+			if udpAddr.Port+delta <= 65535 {
+				add(&net.UDPAddr{IP: udpAddr.IP, Port: udpAddr.Port + delta})
+			}
+			if udpAddr.Port-delta >= 1 {
+				add(&net.UDPAddr{IP: udpAddr.IP, Port: udpAddr.Port - delta})
+			}
+		}
+	}
+	return out
+}
+
 func peerCandidateEndpoints(peer protocol.PeerCandidate) []string {
+	return peerCandidateEndpointsWithWindow(peer, candidatePortPredictionWindow)
+}
+
+func peerCandidateEndpointsWithWindow(peer protocol.PeerCandidate, window int) []string {
+	out := peerBaseCandidateEndpoints(peer)
+	if window <= 0 {
+		return out
+	}
+	seen := map[string]bool{}
+	for _, endpoint := range out {
+		seen[endpoint] = true
+	}
+	add := func(endpoint string) {
+		normalized, ok := normalizeIPv4Endpoint(endpoint)
+		if !ok || seen[normalized] {
+			return
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+	base := append([]string(nil), out...)
+	for _, endpoint := range base {
+		addPortPredictionWindow(add, endpoint, window)
+	}
+	return out
+}
+
+func peerBaseCandidateEndpoints(peer protocol.PeerCandidate) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(endpoint string) {
@@ -144,19 +248,15 @@ func peerCandidateEndpoints(peer protocol.PeerCandidate) []string {
 			}
 		}
 	}
-	base := append([]string(nil), out...)
-	for _, endpoint := range base {
-		addPortPredictionWindow(add, endpoint)
-	}
 	return out
 }
 
-func addPortPredictionWindow(add func(string), endpoint string) {
+func addPortPredictionWindow(add func(string), endpoint string, window int) {
 	host, port, ok := endpointParts(endpoint)
 	if !ok {
 		return
 	}
-	for delta := 1; delta <= candidatePortPredictionWindow; delta++ {
+	for delta := 1; delta <= window; delta++ {
 		if port+delta <= 65535 {
 			add(net.JoinHostPort(host, strconv.Itoa(port+delta)))
 		}
@@ -254,11 +354,18 @@ func (c *punchClient) KeepAlive(ctx context.Context) {
 }
 
 func (c *punchClient) punchLoop(ctx context.Context) {
+	lastWindow := -1
 	for attempt := 0; ; attempt++ {
 		// 向所有候选端点发送 Hello
 		c.mu.Lock()
-		peers := append([]net.Addr(nil), c.peers...)
+		basePeers := append([]net.Addr(nil), c.peers...)
 		c.mu.Unlock()
+		peers := punchAddrBatch(basePeers, attempt, maxPunchCandidatesPerAttempt)
+		window := punchPredictionWindow(attempt)
+		if window != lastWindow {
+			log.Printf("UDP punch stage for session %s: attempt=%d window=+/-%d total_candidates=%d batch=%d", c.offer.SessionID, attempt, window, len(expandAddrCandidates(basePeers, window)), len(peers))
+			lastWindow = window
+		}
 		for _, p := range peers {
 			if _, err := c.conn.WriteTo(c.hello, p); err != nil {
 				log.Printf("send UDP hello to %s: %v", p, err)
