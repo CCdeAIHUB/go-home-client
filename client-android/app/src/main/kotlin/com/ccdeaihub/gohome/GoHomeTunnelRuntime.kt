@@ -146,6 +146,7 @@ object GoHomeTunnelRuntime {
                     send(sourceSocket, candidate, hello)
                 }
             }
+            }
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receiveAny(currentSockets, untilNextHello)
             if (packet != null) {
