@@ -41,6 +41,7 @@ object GoHomeTunnelRuntime {
     private const val PACKET_FRAME: Byte = 3
     private const val FRAME_READY: Byte = 1
     private const val FRAME_KEEPALIVE: Byte = 2
+    private const val FRAME_PING: Byte = 3
     private const val FRAME_PONG: Byte = 4
     private const val FRAME_IPV4: Byte = 5
     private const val GCM_NONCE_SIZE = 12
@@ -65,6 +66,7 @@ object GoHomeTunnelRuntime {
     private var lastError = ""
     private var uploaded = 0L
     private var downloaded = 0L
+    private var tunnelRTTMS = 0L
     private var tunnelFd: ParcelFileDescriptor? = null
     private var tunInput: FileInputStream? = null
     private var tunOutput: FileOutputStream? = null
@@ -87,6 +89,7 @@ object GoHomeTunnelRuntime {
             lastError = ""
             uploaded = 0
             downloaded = 0
+            tunnelRTTMS = 0
         }
         android.util.Log.i("GoHomeTunnel", "Prepared UDP sockets localPorts=${preparedSockets.map { it.localPort }}")
         return JSONObject()
@@ -140,12 +143,9 @@ object GoHomeTunnelRuntime {
             }
             // Send Hello packets from every punch socket to the current batch.
             for (sourceSocket in currentSockets) {
-            // 向所有候选端点发送 Hello（多路径打洞）
-            for (sourceSocket in currentSockets) {
                 for (candidate in snapshot) {
                     send(sourceSocket, candidate, hello)
                 }
-            }
             }
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receiveAny(currentSockets, untilNextHello)
@@ -237,6 +237,7 @@ object GoHomeTunnelRuntime {
         synchronized(lock) {
             return JSONObject()
                 .put("udp", if (udpConnected) "connected" else "idle")
+                .put("tunnel_rtt_ms", tunnelRTTMS)
                 .put("last_error", lastError)
         }
     }
@@ -247,7 +248,7 @@ object GoHomeTunnelRuntime {
                 .put("up", uploaded)
                 .put("down", downloaded)
                 .put("loss", 0)
-                .put("tunnel_rtt_ms", 0)
+                .put("tunnel_rtt_ms", tunnelRTTMS)
         }
     }
 
@@ -260,6 +261,7 @@ object GoHomeTunnelRuntime {
             peer = null
             sendSequence = 0
             replay = ReplayWindow()
+            tunnelRTTMS = 0
             punchSockets.forEach { it.close() }
             punchSockets = mutableListOf()
             socket?.close()
@@ -343,7 +345,7 @@ object GoHomeTunnelRuntime {
                     }
                     when (frame.type) {
                         FRAME_READY -> Unit
-                        FRAME_PONG -> Unit
+                        FRAME_PONG -> recordTunnelPong(frame.payload)
                         FRAME_IPV4 -> writeTunPacket(frame.payload)
                     }
                 } catch (error: Exception) {
@@ -357,8 +359,8 @@ object GoHomeTunnelRuntime {
         thread(name = "go-home-android-keepalive", isDaemon = true) {
             while (synchronized(lock) { running }) {
                 try {
-                    Thread.sleep(10_000)
-                    sendFrame(FRAME_KEEPALIVE, "keepalive".toByteArray(Charsets.UTF_8))
+                    sendTunnelPing()
+                    Thread.sleep(5_000)
                 } catch (_: InterruptedException) {
                     return@thread
                 } catch (error: Exception) {
@@ -366,6 +368,22 @@ object GoHomeTunnelRuntime {
                 }
             }
         }
+    }
+
+    private fun sendTunnelPing() {
+        val payload = ByteBuffer.allocate(Long.SIZE_BYTES)
+            .order(ByteOrder.BIG_ENDIAN)
+            .putLong(System.currentTimeMillis())
+            .array()
+        sendFrame(FRAME_PING, payload)
+    }
+
+    private fun recordTunnelPong(payload: ByteArray) {
+        if (payload.size != Long.SIZE_BYTES) return
+        val sentAt = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).long
+        val rtt = System.currentTimeMillis() - sentAt
+        if (rtt !in 0..60_000) return
+        synchronized(lock) { tunnelRTTMS = rtt }
     }
 
     private fun startTunReadLoop() {

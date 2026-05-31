@@ -44,7 +44,11 @@ const androidSignalAPI = {
     return { ok: true }
   },
   async disconnectServer() {
-    window.GoHomeNative.signalDisconnect()
+    if (window.GoHomeNative.disconnectTunnel) {
+      window.GoHomeNative.disconnectTunnel()
+    } else {
+      window.GoHomeNative.signalDisconnect()
+    }
     return { ok: true }
   },
   async getConnectionStatus() {

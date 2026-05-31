@@ -183,6 +183,7 @@ class MainActivity : Activity() {
             val latch = CountDownLatch(1)
             Thread {
                 try {
+                    GoHomeTunnelRuntime.stop(activity)
                     val prepared = GoHomeTunnelRuntime.prepare(deviceID)
                     val protectLatch = CountDownLatch(1)
                     activity.runOnUiThread {

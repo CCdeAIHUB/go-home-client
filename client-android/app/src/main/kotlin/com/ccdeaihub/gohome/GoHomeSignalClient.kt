@@ -47,6 +47,7 @@ object GoHomeSignalClient {
     private var connected = false
     private var intentionalClose = false
     private var lastError = ""
+    private var publicRTTMS = 0L
     private var socketGeneration = 0
 
     private val seq = AtomicInteger(0)
@@ -70,6 +71,7 @@ object GoHomeSignalClient {
             this.udpRegisterPorts = emptyList()
             this.intentionalClose = false
             this.lastError = ""
+            this.publicRTTMS = 0
             this.socketGeneration += 1
         }
         val gen = synchronized(lock) { socketGeneration }
@@ -141,6 +143,8 @@ object GoHomeSignalClient {
             .put("websocket", st)
             .put("udp", tunnel.optString("udp", "idle"))
             .put("grace_seconds", 0)
+            .put("latency_ms", synchronized(lock) { publicRTTMS })
+            .put("public_rtt_ms", synchronized(lock) { publicRTTMS })
             .put("last_error", synchronized(lock) { lastError })
             .toString()
     }
@@ -315,7 +319,15 @@ object GoHomeSignalClient {
             val action = env.optString("action", "")
             if (action == "device.latency_probe") {
                 val probeId = env.optJSONObject("params")?.optString("probe_id") ?: ""
-                rpcInternal("stats.latency_pong", JSONObject().put("probe_id", probeId))
+                rpcInternal("stats.latency_pong", JSONObject().put("probe_id", probeId)) { ok, data ->
+                    if (!ok) return@rpcInternal
+                    try {
+                        val latency = JSONObject(data).optLong("latency_ms", 0)
+                        if (latency >= 0) synchronized(lock) { publicRTTMS = latency }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "parse public server latency", e)
+                    }
+                }
             } else if (action == "device.force_offline") {
                 synchronized(lock) { intentionalClose = true }
                 closeInternal()
@@ -332,14 +344,19 @@ object GoHomeSignalClient {
         }
     }
 
-    private fun rpcInternal(action: String, params: JSONObject) {
+    private fun rpcInternal(action: String, params: JSONObject, onResult: ((ok: Boolean, data: String) -> Unit)? = null) {
         val id = "i-${seq.incrementAndGet()}"
         val envelope = JSONObject()
             .put("jsonrpc", "2.0")
             .put("id", id)
             .put("action", action)
             .put("params", params)
-        synchronized(lock) { ws?.send(envelope.toString()) }
+        if (onResult != null) pending[id] = onResult
+        val sent = synchronized(lock) { ws?.send(envelope.toString()) ?: false }
+        if (!sent) {
+            pending.remove(id)
+            onResult?.invoke(false, "not connected")
+        }
     }
 
     private fun handleDisconnect(gen: Int) {
@@ -425,6 +442,7 @@ object GoHomeSignalClient {
         deviceToken = ""
         udpRegisterHost = ""
         udpRegisterPorts = emptyList()
+        publicRTTMS = 0
         failAllPending("closed")
     }
 
