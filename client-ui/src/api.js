@@ -161,7 +161,7 @@ function connectTunnelAsync(offer, mode, virtualCIDR) {
     const timeout = setTimeout(() => {
       delete window._goHomeTunnelCallbacks[callbackId]
       reject(new Error('连接超时'))
-    }, 20000)
+    }, 45000)
 
     window._goHomeTunnelCallbacks[callbackId] = (jsonStr) => {
       clearTimeout(timeout)
