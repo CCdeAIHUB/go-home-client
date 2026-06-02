@@ -50,6 +50,9 @@ object GoHomeTunnelRuntime {
     private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
     private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 48
     private const val MULTI_SOCKET_PUNCH_ATTEMPTS = 32
+    private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
+    private const val FULL_PORT_SWEEP_BATCH_SIZE = 64
+    private const val FULL_PORT_SWEEP_SOCKET_INDEX = 1
     private const val PUNCH_TIMEOUT_MS = 45_000L
     private const val PUNCH_SOCKET_COUNT = 8
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
@@ -139,11 +142,13 @@ object GoHomeTunnelRuntime {
         while (System.currentTimeMillis() < deadline) {
             drainPunchCandidates(currentSessionID, candidates)
             val snapshot = punchCandidateBatch(candidates, attempt)
+            val sweepCandidates = fullPortSweepBatch(candidates, attempt)
             val sendSockets = if (attempt < MULTI_SOCKET_PUNCH_ATTEMPTS) currentSockets else listOf(currentSockets[0])
+            val sweepSocket = currentSockets.getOrElse(FULL_PORT_SWEEP_SOCKET_INDEX) { currentSockets[0] }
             val window = punchPredictionWindow(attempt)
             if (window != lastWindow) {
                 val total = expandCandidates(candidates, window).size
-                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sockets=${sendSockets.size}/${currentSockets.size}")
+                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sweep=${sweepCandidates.size} sockets=${sendSockets.size}/${currentSockets.size}")
                 lastWindow = window
             }
             for (sourceSocket in sendSockets) {
@@ -151,10 +156,12 @@ object GoHomeTunnelRuntime {
                     send(sourceSocket, candidate, hello)
                 }
             }
-            // The home server owns the exhaustive fallback sweep. Keeping the
-            // client focused on known endpoints preserves the cellular NAT
-            // mapping to the home server instead of creating tens of
-            // thousands of competing mappings on the phone.
+            // Keep the primary socket focused on known endpoints. A dedicated
+            // helper socket performs the exhaustive fallback without churning
+            // the cellular NAT mapping used by the main punch path.
+            for (candidate in sweepCandidates) {
+                send(sweepSocket, candidate, hello)
+            }
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receiveAny(currentSockets, untilNextHello)
             if (packet != null) {
@@ -631,6 +638,24 @@ object GoHomeTunnelRuntime {
         val offset = (attempt * room) % rotating.size
         repeat(room) { index ->
             out.add(rotating[(offset + index) % rotating.size])
+        }
+        return out
+    }
+
+    private fun fullPortSweepBatch(base: List<InetSocketAddress>, attempt: Int): List<InetSocketAddress> {
+        if (attempt < FULL_PORT_SWEEP_START_ATTEMPT) return emptyList()
+        val hosts = base.mapNotNull { it.address as? Inet4Address }.distinctBy { it.hostAddress }
+        if (hosts.isEmpty()) return emptyList()
+        val out = mutableListOf<InetSocketAddress>()
+        val offset = ((attempt - FULL_PORT_SWEEP_START_ATTEMPT) * FULL_PORT_SWEEP_BATCH_SIZE) % 65535
+        var index = 0
+        while (index < 65535 && out.size < FULL_PORT_SWEEP_BATCH_SIZE) {
+            val port = (offset + index) % 65535 + 1
+            for (host in hosts) {
+                out.add(InetSocketAddress(host, port))
+                if (out.size >= FULL_PORT_SWEEP_BATCH_SIZE) break
+            }
+            index += 1
         }
         return out
     }
