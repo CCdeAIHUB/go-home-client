@@ -95,7 +95,8 @@ const androidSignalAPI = {
         client_udp_port: prepared.udp_port,
         preferred_mode: options.mode,
         virtual_cidr: options.virtual_cidr || '',
-        client_virtual_mac: prepared.client_virtual_mac
+        client_virtual_mac: prepared.client_virtual_mac,
+        fallback_sweep: attempt > 0
       })
 
       try {

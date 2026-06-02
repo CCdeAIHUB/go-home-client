@@ -50,7 +50,11 @@ object GoHomeTunnelRuntime {
     private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
     private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 192
     private const val PUNCH_TIMEOUT_MS = 28_000L
+    private const val FALLBACK_PUNCH_TIMEOUT_MS = 40_000L
     private const val PUNCH_SOCKET_COUNT = 8
+    private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
+    private const val FULL_PORT_SWEEP_BATCH_SIZE = 1024
+    private const val FULL_PORT_SWEEP_SOCKET_INDEX = 1
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
     private val lock = Object()
@@ -118,8 +122,9 @@ object GoHomeTunnelRuntime {
         val candidates = peerBaseCandidates(server)
         if (candidates.isEmpty()) throw IllegalStateException("home server has no usable IPv4 UDP candidate")
         var currentPeer = candidates[0]
+        val fallbackSweep = offer.optJSONObject("request")?.optBoolean("fallback_sweep", false) ?: false
         android.util.Log.i("GoHomeTunnel", "UDP punch base candidates for session $currentSessionID: $candidates")
-        val deadline = System.currentTimeMillis() + PUNCH_TIMEOUT_MS
+        val deadline = System.currentTimeMillis() + if (fallbackSweep) FALLBACK_PUNCH_TIMEOUT_MS else PUNCH_TIMEOUT_MS
         var attempt = 0
         var probesSeen = 0
         var framesSeen = 0
@@ -138,16 +143,21 @@ object GoHomeTunnelRuntime {
         while (System.currentTimeMillis() < deadline) {
             drainPunchCandidates(currentSessionID, candidates)
             val snapshot = punchCandidateBatch(candidates, attempt)
+            val sweepCandidates = if (fallbackSweep) fullPortSweepBatch(candidates, attempt) else emptyList()
+            val sweepSocket = currentSockets.getOrElse(FULL_PORT_SWEEP_SOCKET_INDEX) { currentSockets[0] }
             val window = punchPredictionWindow(attempt)
             if (window != lastWindow) {
                 val total = expandCandidates(candidates, window).size
-                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sockets=${currentSockets.size}")
+                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sweep=${sweepCandidates.size} sockets=${currentSockets.size}")
                 lastWindow = window
             }
             for (sourceSocket in currentSockets) {
                 for (candidate in snapshot) {
                     send(sourceSocket, candidate, hello)
                 }
+            }
+            for (candidate in sweepCandidates) {
+                send(sweepSocket, candidate, hello)
             }
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receiveAny(currentSockets, untilNextHello)
@@ -636,6 +646,24 @@ object GoHomeTunnelRuntime {
             attempt < 60 -> 256
             else -> AGGRESSIVE_PORT_PREDICTION_WINDOW
         }
+    }
+
+    private fun fullPortSweepBatch(base: List<InetSocketAddress>, attempt: Int): List<InetSocketAddress> {
+        if (attempt < FULL_PORT_SWEEP_START_ATTEMPT) return emptyList()
+        val hosts = base.mapNotNull { it.address as? Inet4Address }.distinctBy { it.hostAddress }
+        if (hosts.isEmpty()) return emptyList()
+        val out = mutableListOf<InetSocketAddress>()
+        val offset = ((attempt - FULL_PORT_SWEEP_START_ATTEMPT) * FULL_PORT_SWEEP_BATCH_SIZE) % 65535
+        var index = 0
+        while (index < 65535 && out.size < FULL_PORT_SWEEP_BATCH_SIZE) {
+            val port = (offset + index) % 65535 + 1
+            for (host in hosts) {
+                out.add(InetSocketAddress(host, port))
+                if (out.size >= FULL_PORT_SWEEP_BATCH_SIZE) break
+            }
+            index += 1
+        }
+        return out
     }
 
     private fun expandCandidates(base: List<InetSocketAddress>, window: Int): List<InetSocketAddress> {
