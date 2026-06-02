@@ -349,7 +349,7 @@ function timeAgo(ts) {
           </div>
           <label>
             <span>服务器 IP:端口</span>
-            <input v-model="state.server" placeholder="49.232.155.3:8080" autocomplete="url" />
+              <input v-model="state.server" placeholder="your-server.example.com:8080" autocomplete="url" />
           </label>
           <label>
             <span>授权码</span>

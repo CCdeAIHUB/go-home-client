@@ -47,8 +47,8 @@ object GoHomeTunnelRuntime {
     private const val GCM_NONCE_SIZE = 12
     private const val PORT_PREDICTION_WINDOW = 16
     private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
-    private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 192
-    private const val PUNCH_TIMEOUT_MS = 40_000L
+    private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 48
+    private const val PUNCH_TIMEOUT_MS = 45_000L
     private const val PUNCH_SOCKET_COUNT = 8
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
@@ -634,8 +634,9 @@ object GoHomeTunnelRuntime {
             if (seen.add(candidateKey(normalized))) out.add(normalized)
         }
         base.forEach(::add)
-        out.toList().forEach { endpoint ->
-            for (delta in 1..window) {
+        val exact = out.toList()
+        for (delta in 1..window) {
+            exact.forEach { endpoint ->
                 if (endpoint.port + delta <= 65535) {
                     add(InetSocketAddress(endpoint.address, endpoint.port + delta))
                 }
