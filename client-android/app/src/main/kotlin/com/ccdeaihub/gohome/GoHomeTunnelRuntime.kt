@@ -48,11 +48,8 @@ object GoHomeTunnelRuntime {
     private const val GCM_NONCE_SIZE = 12
     private const val PORT_PREDICTION_WINDOW = 16
     private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
-    private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 48
-    private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
-    private const val FULL_PORT_SWEEP_BATCH_SIZE = 64
-    private const val MULTI_SOCKET_PUNCH_ATTEMPTS = 32
-    private const val PUNCH_TIMEOUT_MS = 45_000L
+    private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 192
+    private const val PUNCH_TIMEOUT_MS = 40_000L
     private const val PUNCH_SOCKET_COUNT = 8
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
@@ -141,26 +138,16 @@ object GoHomeTunnelRuntime {
         while (System.currentTimeMillis() < deadline) {
             drainPunchCandidates(currentSessionID, candidates)
             val snapshot = punchCandidateBatch(candidates, attempt)
-            val sweepCandidates = fullPortSweepBatch(candidates, attempt)
-            val sendSockets = if (attempt < MULTI_SOCKET_PUNCH_ATTEMPTS) currentSockets else listOf(currentSockets[0])
             val window = punchPredictionWindow(attempt)
             if (window != lastWindow) {
                 val total = expandCandidates(candidates, window).size
-                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sweep=${sweepCandidates.size} sockets=${sendSockets.size}/${currentSockets.size}")
+                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sockets=${currentSockets.size}")
                 lastWindow = window
             }
-            // Try multiple mappings early, then keep the mobile-side fallback
-            // lightweight while the home server performs the exhaustive sweep.
-            for (sourceSocket in sendSockets) {
+            for (sourceSocket in currentSockets) {
                 for (candidate in snapshot) {
                     send(sourceSocket, candidate, hello)
                 }
-            }
-            // After nearby prediction has failed, sweep the remaining port
-            // space from one socket. This handles random symmetric NATs while
-            // keeping the mobile bandwidth cost bounded.
-            for (candidate in sweepCandidates) {
-                send(currentSockets[0], candidate, hello)
             }
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receiveAny(currentSockets, untilNextHello)
@@ -649,26 +636,6 @@ object GoHomeTunnelRuntime {
             attempt < 60 -> 256
             else -> AGGRESSIVE_PORT_PREDICTION_WINDOW
         }
-    }
-
-    private fun fullPortSweepBatch(base: List<InetSocketAddress>, attempt: Int): List<InetSocketAddress> {
-        if (attempt < FULL_PORT_SWEEP_START_ATTEMPT) return emptyList()
-        val hosts = linkedMapOf<String, Inet4Address>()
-        base.forEach { candidate ->
-            val address = candidate.address as? Inet4Address ?: return@forEach
-            hosts.putIfAbsent(address.hostAddress ?: return@forEach, address)
-        }
-        if (hosts.isEmpty()) return emptyList()
-        val out = ArrayList<InetSocketAddress>(FULL_PORT_SWEEP_BATCH_SIZE)
-        val offset = ((attempt - FULL_PORT_SWEEP_START_ATTEMPT) * FULL_PORT_SWEEP_BATCH_SIZE) % 65535
-        for (index in 0 until 65535) {
-            val port = (offset + index) % 65535 + 1
-            for (address in hosts.values) {
-                out.add(InetSocketAddress(address, port))
-                if (out.size >= FULL_PORT_SWEEP_BATCH_SIZE) return out
-            }
-        }
-        return out
     }
 
     private fun expandCandidates(base: List<InetSocketAddress>, window: Int): List<InetSocketAddress> {
