@@ -79,33 +79,42 @@ const androidSignalAPI = {
       }
     }
 
-    // Step 2: Prepare UDP tunnel
-    const prepared = readAndroidJSON(window.GoHomeNative.prepareTunnel(window.GoHomeNative.deviceId()))
-    if (prepared.error) throw new Error(prepared.error)
-    if (window.GoHomeNative.registerTunnelEndpoint) {
-      const registered = readAndroidJSON(window.GoHomeNative.registerTunnelEndpoint())
-      if (registered.error) console.warn('UDP endpoint registration failed:', registered.error)
-    }
+    let lastError
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      // A fresh socket set gives symmetric NAT a new mapping opportunity
+      // without disturbing mappings while an individual attempt is active.
+      const prepared = readAndroidJSON(window.GoHomeNative.prepareTunnel(window.GoHomeNative.deviceId()))
+      if (prepared.error) throw new Error(prepared.error)
+      if (window.GoHomeNative.registerTunnelEndpoint) {
+        const registered = readAndroidJSON(window.GoHomeNative.registerTunnelEndpoint())
+        if (registered.error) console.warn('UDP endpoint registration failed:', registered.error)
+      }
 
-    // Step 3: Request hole punch via signal server
-    const offer = await androidRPC('p2p.hole_punch_req', {
-      family_id: familyID,
-      client_udp_port: prepared.udp_port,
-      preferred_mode: options.mode,
-      virtual_cidr: options.virtual_cidr || '',
-      client_virtual_mac: prepared.client_virtual_mac
-    })
+      const offer = await androidRPC('p2p.hole_punch_req', {
+        family_id: familyID,
+        client_udp_port: prepared.udp_port,
+        preferred_mode: options.mode,
+        virtual_cidr: options.virtual_cidr || '',
+        client_virtual_mac: prepared.client_virtual_mac
+      })
 
-    // Step 4: Connect tunnel (use async version if available for better UX)
-    if (window.GoHomeNative.connectTunnelAsync) {
-      return await connectTunnelAsync(offer, options.mode, options.virtual_cidr || '')
-    } else {
-      return readAndroidJSON(window.GoHomeNative.connectTunnel(
-        JSON.stringify(offer),
-        options.mode,
-        options.virtual_cidr || ''
-      ))
+      try {
+        if (window.GoHomeNative.connectTunnelAsync) {
+          return await connectTunnelAsync(offer, options.mode, options.virtual_cidr || '')
+        }
+        return readAndroidJSON(window.GoHomeNative.connectTunnel(
+          JSON.stringify(offer),
+          options.mode,
+          options.virtual_cidr || ''
+        ))
+      } catch (error) {
+        lastError = error
+        if (attempt === 0) {
+          console.warn('UDP direct attempt failed, retrying with fresh sockets:', error)
+        }
+      }
     }
+    throw lastError || new Error('UDP direct tunnel handshake timed out')
   },
   async getTrafficStats() {
     const status = readAndroidJSON(window.GoHomeNative.signalStatus())
