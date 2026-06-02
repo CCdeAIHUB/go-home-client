@@ -49,8 +49,6 @@ object GoHomeTunnelRuntime {
     private const val PORT_PREDICTION_WINDOW = 16
     private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
     private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 48
-    private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
-    private const val FULL_PORT_SWEEP_BATCH_SIZE = 64
     private const val MULTI_SOCKET_PUNCH_ATTEMPTS = 32
     private const val PUNCH_TIMEOUT_MS = 45_000L
     private const val PUNCH_SOCKET_COUNT = 8
@@ -141,12 +139,11 @@ object GoHomeTunnelRuntime {
         while (System.currentTimeMillis() < deadline) {
             drainPunchCandidates(currentSessionID, candidates)
             val snapshot = punchCandidateBatch(candidates, attempt)
-            val sweepCandidates = fullPortSweepBatch(candidates, attempt)
             val sendSockets = if (attempt < MULTI_SOCKET_PUNCH_ATTEMPTS) currentSockets else listOf(currentSockets[0])
             val window = punchPredictionWindow(attempt)
             if (window != lastWindow) {
                 val total = expandCandidates(candidates, window).size
-                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sweep=${sweepCandidates.size} sockets=${sendSockets.size}/${currentSockets.size}")
+                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sockets=${sendSockets.size}/${currentSockets.size}")
                 lastWindow = window
             }
             for (sourceSocket in sendSockets) {
@@ -154,9 +151,10 @@ object GoHomeTunnelRuntime {
                     send(sourceSocket, candidate, hello)
                 }
             }
-            for (candidate in sweepCandidates) {
-                send(currentSockets[0], candidate, hello)
-            }
+            // The home server owns the exhaustive fallback sweep. Keeping the
+            // client focused on known endpoints preserves the cellular NAT
+            // mapping to the home server instead of creating tens of
+            // thousands of competing mappings on the phone.
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             val packet = receiveAny(currentSockets, untilNextHello)
             if (packet != null) {
@@ -665,26 +663,6 @@ object GoHomeTunnelRuntime {
                 if (endpoint.port - delta >= 1) {
                     add(InetSocketAddress(endpoint.address, endpoint.port - delta))
                 }
-            }
-        }
-        return out
-    }
-
-    private fun fullPortSweepBatch(base: List<InetSocketAddress>, attempt: Int): List<InetSocketAddress> {
-        if (attempt < FULL_PORT_SWEEP_START_ATTEMPT) return emptyList()
-        val hosts = linkedMapOf<String, Inet4Address>()
-        base.forEach { candidate ->
-            val address = candidate.address as? Inet4Address ?: return@forEach
-            hosts.putIfAbsent(address.hostAddress ?: return@forEach, address)
-        }
-        if (hosts.isEmpty()) return emptyList()
-        val out = ArrayList<InetSocketAddress>(FULL_PORT_SWEEP_BATCH_SIZE)
-        val offset = ((attempt - FULL_PORT_SWEEP_START_ATTEMPT) * FULL_PORT_SWEEP_BATCH_SIZE) % 65535
-        for (index in 0 until 65535) {
-            val port = (offset + index) % 65535 + 1
-            for (address in hosts.values) {
-                out.add(InetSocketAddress(address, port))
-                if (out.size >= FULL_PORT_SWEEP_BATCH_SIZE) return out
             }
         }
         return out
