@@ -209,36 +209,60 @@ object GoHomeSignalClient {
                         .put("timestamp", ts))
 
                 // Register handler for auth response to get server_udp_port
-                pending[authId] = { ok, data ->
-                    if (ok) {
-                        try {
-                            val result = JSONObject(data)
-                            val serverUdpPort = result.optInt("server_udp_port", 0)
-                            val serverUdpPorts = mutableListOf<Int>()
-                            val portsJSON = result.optJSONArray("server_udp_ports")
-                            if (portsJSON != null) {
-                                for (index in 0 until portsJSON.length()) {
-                                    val port = portsJSON.optInt(index, 0)
-                                    if (port in 1..65535 && !serverUdpPorts.contains(port)) {
-                                        serverUdpPorts.add(port)
-                                    }
-                                }
+                pending[authId] = authHandler@{ ok, data ->
+                    if (!ok) {
+                        synchronized(lock) {
+                            if (socketGeneration == gen) {
+                                connected = false
+                                lastError = data
+                                intentionalClose = true
                             }
-                            if (serverUdpPort in 1..65535 && !serverUdpPorts.contains(serverUdpPort)) {
-                                serverUdpPorts.add(0, serverUdpPort)
-                            }
-                            val token = result.optString("token", "")
-                            val serverHost = parseServerHost(currentServer) ?: ""
-                            synchronized(lock) {
-                                if (socketGeneration == gen) {
-                                    deviceToken = token
-                                    udpRegisterHost = serverHost
-                                    udpRegisterPorts = serverUdpPorts
-                                }
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "parse auth result", e)
                         }
+                        out[0] = """{"error":${JSONObject.quote(data)}}"""
+                        latch.countDown()
+                        webSocket.close(1008, "authentication failed")
+                        return@authHandler
+                    }
+                    try {
+                        val result = JSONObject(data)
+                        val serverUdpPort = result.optInt("server_udp_port", 0)
+                        val serverUdpPorts = mutableListOf<Int>()
+                        val portsJSON = result.optJSONArray("server_udp_ports")
+                        if (portsJSON != null) {
+                            for (index in 0 until portsJSON.length()) {
+                                val port = portsJSON.optInt(index, 0)
+                                if (port in 1..65535 && !serverUdpPorts.contains(port)) {
+                                    serverUdpPorts.add(port)
+                                }
+                            }
+                        }
+                        if (serverUdpPort in 1..65535 && !serverUdpPorts.contains(serverUdpPort)) {
+                            serverUdpPorts.add(0, serverUdpPort)
+                        }
+                        val token = result.optString("token", "")
+                        require(token.isNotBlank()) { "authentication response is missing device token" }
+                        val serverHost = parseServerHost(currentServer) ?: ""
+                        synchronized(lock) {
+                            if (socketGeneration == gen) {
+                                deviceToken = token
+                                udpRegisterHost = serverHost
+                                udpRegisterPorts = serverUdpPorts
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "parse auth result", e)
+                        val message = e.message ?: "invalid authentication response"
+                        synchronized(lock) {
+                            if (socketGeneration == gen) {
+                                connected = false
+                                lastError = message
+                                intentionalClose = true
+                            }
+                        }
+                        out[0] = """{"error":${JSONObject.quote(message)}}"""
+                        latch.countDown()
+                        webSocket.close(1008, "invalid authentication response")
+                        return@authHandler
                     }
                     val shouldContinue = synchronized(lock) {
                         if (socketGeneration != gen) false else {
