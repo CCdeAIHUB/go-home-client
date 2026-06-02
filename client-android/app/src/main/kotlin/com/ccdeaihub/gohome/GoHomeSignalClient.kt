@@ -149,7 +149,7 @@ object GoHomeSignalClient {
             .toString()
     }
 
-    fun registerTunnelEndpoint(): String {
+    fun registerTunnelEndpoint(rounds: Int = 4): String {
         val target = synchronized(lock) {
             UDPRegisterTarget(udpRegisterHost, udpRegisterPorts, deviceId, deviceToken, connected)
         }
@@ -160,7 +160,8 @@ object GoHomeSignalClient {
             ?: return """{"error":"build register packet failed"}"""
         var sent = 0
         var lastError = ""
-        repeat(4) { index ->
+        val sendRounds = rounds.coerceIn(1, 4)
+        repeat(sendRounds) { index ->
             for (port in target.ports) {
                 try {
                     if (GoHomeTunnelRuntime.sendRegister(target.host, port, packet)) {
@@ -171,7 +172,7 @@ object GoHomeSignalClient {
                     Log.w(TAG, "register prepared UDP endpoint", e)
                 }
             }
-            if (index < 3) {
+            if (index < sendRounds - 1) {
                 try { Thread.sleep(120) } catch (_: InterruptedException) { return@repeat }
             }
         }
@@ -332,6 +333,13 @@ object GoHomeSignalClient {
                 synchronized(lock) { intentionalClose = true }
                 closeInternal()
                 GoHomeTunnelRuntime.stop(null)
+            } else if (action == "p2p.candidate") {
+                val params = env.optJSONObject("params")
+                val sessionId = params?.optString("session_id") ?: ""
+                val candidate = params?.optString("candidate") ?: ""
+                if (sessionId.isNotBlank() && candidate.isNotBlank()) {
+                    GoHomeTunnelRuntime.addPunchCandidate(sessionId, candidate)
+                }
             } else if (action == "family.home_server_changed") {
                 // 家庭服务器状态变更，通知 UI 刷新
                 val params = env.optJSONObject("params")

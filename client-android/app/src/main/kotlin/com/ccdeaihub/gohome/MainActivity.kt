@@ -21,6 +21,7 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
     private var vpnPermissionGranted = false
@@ -234,7 +235,7 @@ class MainActivity : Activity() {
             val callbackId = "tunnel-${tunnelCallbackSeq++}"
             Thread {
                 val jsonResult = try {
-                    GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+                    connectTunnelWithAssist(offer, mode, virtualCIDR).toString()
                 } catch (e: Exception) {
                     """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
                 }
@@ -260,7 +261,7 @@ class MainActivity : Activity() {
             val latch = CountDownLatch(1)
             Thread {
                 try {
-                    result[0] = GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+                    result[0] = connectTunnelWithAssist(offer, mode, virtualCIDR).toString()
                 } catch (e: Exception) {
                     result[0] = """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
                 }
@@ -268,6 +269,32 @@ class MainActivity : Activity() {
             }.start()
             latch.await(15, TimeUnit.SECONDS)
             return result[0]
+        }
+
+        private fun connectTunnelWithAssist(offer: String, mode: String, virtualCIDR: String): JSONObject {
+            val assisting = AtomicBoolean(true)
+            val assistThread = Thread {
+                while (assisting.get()) {
+                    try {
+                        GoHomeSignalClient.registerTunnelEndpoint(1)
+                        Thread.sleep(600)
+                    } catch (_: InterruptedException) {
+                        return@Thread
+                    } catch (e: Exception) {
+                        Log.w("GoHome", "Refresh UDP endpoint during punch", e)
+                    }
+                }
+            }.apply {
+                name = "go-home-punch-assist"
+                isDaemon = true
+                start()
+            }
+            return try {
+                GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR)
+            } finally {
+                assisting.set(false)
+                assistThread.interrupt()
+            }
         }
 
         @JavascriptInterface

@@ -39,6 +39,7 @@ object GoHomeTunnelRuntime {
     private const val PACKET_PROBE: Byte = 1
     private const val PACKET_HELLO: Byte = 2
     private const val PACKET_FRAME: Byte = 3
+    private const val PACKET_REGISTER_ACK: Byte = 5
     private const val FRAME_READY: Byte = 1
     private const val FRAME_KEEPALIVE: Byte = 2
     private const val FRAME_PING: Byte = 3
@@ -70,6 +71,7 @@ object GoHomeTunnelRuntime {
     private var tunnelFd: ParcelFileDescriptor? = null
     private var tunInput: FileInputStream? = null
     private var tunOutput: FileOutputStream? = null
+    private val pendingPunchCandidates = mutableMapOf<String, MutableList<InetSocketAddress>>()
 
     fun prepare(deviceID: String): JSONObject {
         stop(null)
@@ -134,6 +136,7 @@ object GoHomeTunnelRuntime {
         }
 
         while (System.currentTimeMillis() < deadline) {
+            drainPunchCandidates(currentSessionID, candidates)
             val snapshot = punchCandidateBatch(candidates, attempt)
             val window = punchPredictionWindow(attempt)
             if (window != lastWindow) {
@@ -182,6 +185,9 @@ object GoHomeTunnelRuntime {
                                 return readyToView(ready, mode, virtualCIDR)
                             }
                         }
+                        PACKET_REGISTER_ACK -> {
+                            android.util.Log.d("GoHomeTunnel", "Received UDP register ack from ${packet.source}")
+                        }
                     }
                 } catch (e: Exception) {
                     android.util.Log.d("GoHomeTunnel", "ignore UDP packet during punch: ${e.message}")
@@ -216,6 +222,17 @@ object GoHomeTunnelRuntime {
                 android.util.Log.i("GoHomeTunnel", "Protect UDP socket localPort=${it.localPort} result=$ok")
             }
         }
+    }
+
+    fun addPunchCandidate(currentSessionID: String, endpoint: String) {
+        val candidate = runCatching { parseEndpoint(endpoint) }.getOrNull() ?: return
+        synchronized(lock) {
+            val candidates = pendingPunchCandidates.getOrPut(currentSessionID) { mutableListOf() }
+            if (candidates.none { candidateKey(it) == candidateKey(candidate) }) {
+                candidates.add(candidate)
+            }
+        }
+        android.util.Log.i("GoHomeTunnel", "Queued live UDP candidate for session $currentSessionID: $candidate")
     }
 
     fun sendRegister(serverHost: String, serverUDPPort: Int, packet: ByteArray): Boolean {
@@ -262,6 +279,7 @@ object GoHomeTunnelRuntime {
             sendSequence = 0
             replay = ReplayWindow()
             tunnelRTTMS = 0
+            pendingPunchCandidates.clear()
             punchSockets.forEach { it.close() }
             punchSockets = mutableListOf()
             socket?.close()
@@ -653,6 +671,11 @@ object GoHomeTunnelRuntime {
         if (candidates.none { candidateKey(it) == key }) {
             candidates.add(candidate)
         }
+    }
+
+    private fun drainPunchCandidates(currentSessionID: String, candidates: MutableList<InetSocketAddress>) {
+        val pending = synchronized(lock) { pendingPunchCandidates.remove(currentSessionID)?.toList().orEmpty() }
+        pending.forEach { addCandidate(candidates, it) }
     }
 
     private fun candidateKey(candidate: InetSocketAddress): String {
