@@ -50,7 +50,8 @@ object GoHomeTunnelRuntime {
     private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
     private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 48
     private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
-    private const val FULL_PORT_SWEEP_BATCH_SIZE = 1024
+    private const val FULL_PORT_SWEEP_BATCH_SIZE = 64
+    private const val MULTI_SOCKET_PUNCH_ATTEMPTS = 32
     private const val PUNCH_TIMEOUT_MS = 45_000L
     private const val PUNCH_SOCKET_COUNT = 8
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
@@ -141,14 +142,16 @@ object GoHomeTunnelRuntime {
             drainPunchCandidates(currentSessionID, candidates)
             val snapshot = punchCandidateBatch(candidates, attempt)
             val sweepCandidates = fullPortSweepBatch(candidates, attempt)
+            val sendSockets = if (attempt < MULTI_SOCKET_PUNCH_ATTEMPTS) currentSockets else listOf(currentSockets[0])
             val window = punchPredictionWindow(attempt)
             if (window != lastWindow) {
                 val total = expandCandidates(candidates, window).size
-                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sweep=${sweepCandidates.size} sockets=${currentSockets.size}")
+                android.util.Log.i("GoHomeTunnel", "UDP punch stage for session $currentSessionID attempt=$attempt window=+/-$window total=$total batch=${snapshot.size} sweep=${sweepCandidates.size} sockets=${sendSockets.size}/${currentSockets.size}")
                 lastWindow = window
             }
-            // Send Hello packets from every punch socket to the current batch.
-            for (sourceSocket in currentSockets) {
+            // Try multiple mappings early, then keep the mobile-side fallback
+            // lightweight while the home server performs the exhaustive sweep.
+            for (sourceSocket in sendSockets) {
                 for (candidate in snapshot) {
                     send(sourceSocket, candidate, hello)
                 }
@@ -194,9 +197,7 @@ object GoHomeTunnelRuntime {
                                 return readyToView(ready, mode, virtualCIDR)
                             }
                         }
-                        PACKET_REGISTER_ACK -> {
-                            android.util.Log.d("GoHomeTunnel", "Received UDP register ack from ${packet.source}")
-                        }
+                        PACKET_REGISTER_ACK -> Unit
                     }
                 } catch (e: Exception) {
                     android.util.Log.d("GoHomeTunnel", "ignore UDP packet during punch: ${e.message}")
@@ -253,7 +254,6 @@ object GoHomeTunnelRuntime {
             throw IllegalArgumentException("server UDP endpoint must be IPv4")
         }
         currentSockets.forEach {
-            android.util.Log.i("GoHomeTunnel", "Send UDP register to $serverHost:$serverUDPPort from localPort=${it.localPort}")
             send(it, InetSocketAddress(address, serverUDPPort), packet)
         }
         return true
