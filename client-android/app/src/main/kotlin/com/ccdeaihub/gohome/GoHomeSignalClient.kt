@@ -429,6 +429,7 @@ object GoHomeSignalClient {
             val json = JSONObject()
                 .put("device_id", deviceID)
                 .put("token", token)
+                .put("udp_port", localUDPPort)
                 .put("local_udp_port", localUDPPort)
                 .toString()
                 .toByteArray(Charsets.UTF_8)
