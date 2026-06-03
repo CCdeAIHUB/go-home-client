@@ -258,18 +258,21 @@ object GoHomeTunnelRuntime {
         android.util.Log.i("GoHomeTunnel", "Queued live UDP candidate for session $currentSessionID: $candidate")
     }
 
-    fun sendRegister(serverHost: String, serverUDPPort: Int, packet: ByteArray): Boolean {
-        if (serverUDPPort <= 0) return false
+    fun sendRegister(serverHost: String, serverUDPPort: Int, packetForLocalPort: (Int) -> ByteArray?): Int {
+        if (serverUDPPort <= 0) return 0
         val currentSockets = synchronized(lock) { punchSockets.toList() }
-        if (currentSockets.isEmpty()) return false
+        if (currentSockets.isEmpty()) return 0
         val address = InetAddress.getByName(serverHost)
         if (address !is Inet4Address) {
             throw IllegalArgumentException("server UDP endpoint must be IPv4")
         }
+        var sent = 0
         currentSockets.forEach {
+            val packet = packetForLocalPort(it.localPort) ?: return@forEach
             send(it, InetSocketAddress(address, serverUDPPort), packet)
+            sent += 1
         }
-        return true
+        return sent
     }
 
     fun status(): JSONObject {

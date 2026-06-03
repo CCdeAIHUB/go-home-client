@@ -4,6 +4,8 @@ export function api() {
   return controlAPI
 }
 
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+
 // Global callback map for async tunnel results
 if (!window._goHomeTunnelCallbacks) {
   window._goHomeTunnelCallbacks = {}
@@ -88,6 +90,9 @@ const androidSignalAPI = {
       if (window.GoHomeNative.registerTunnelEndpoint) {
         const registered = readAndroidJSON(window.GoHomeNative.registerTunnelEndpoint())
         if (registered.error) console.warn('UDP endpoint registration failed:', registered.error)
+        await delay(220)
+        const registeredAgain = readAndroidJSON(window.GoHomeNative.registerTunnelEndpoint())
+        if (registeredAgain.error) console.warn('UDP endpoint registration retry failed:', registeredAgain.error)
       }
 
       const offer = await androidRPC('p2p.hole_punch_req', {

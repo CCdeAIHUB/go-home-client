@@ -156,16 +156,14 @@ object GoHomeSignalClient {
         if (!target.connected) return """{"error":"not connected"}"""
         if (target.host.isBlank() || target.ports.isEmpty()) return """{"error":"server UDP discovery is unavailable"}"""
         if (target.deviceID.isBlank() || target.token.isBlank()) return """{"error":"device token is unavailable"}"""
-        val packet = buildRegisterPacket(target.deviceID, target.token)
-            ?: return """{"error":"build register packet failed"}"""
         var sent = 0
         var lastError = ""
         val sendRounds = rounds.coerceIn(1, 4)
         repeat(sendRounds) { index ->
             for (port in target.ports) {
                 try {
-                    if (GoHomeTunnelRuntime.sendRegister(target.host, port, packet)) {
-                        sent += 1
+                    sent += GoHomeTunnelRuntime.sendRegister(target.host, port) { localPort ->
+                        buildRegisterPacket(target.deviceID, target.token, localPort)
                     }
                 } catch (e: Exception) {
                     lastError = e.message ?: "send UDP register failed"
@@ -426,11 +424,12 @@ object GoHomeSignalClient {
 
     // ── UDP Registration (NAT Endpoint Discovery) ──
 
-    private fun buildRegisterPacket(deviceID: String, token: String): ByteArray? {
+    private fun buildRegisterPacket(deviceID: String, token: String, localUDPPort: Int): ByteArray? {
         try {
             val json = JSONObject()
                 .put("device_id", deviceID)
                 .put("token", token)
+                .put("local_udp_port", localUDPPort)
                 .toString()
                 .toByteArray(Charsets.UTF_8)
             return MAGIC + byteArrayOf(VERSION, PACKET_REGISTER) + json
