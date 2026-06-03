@@ -93,6 +93,7 @@ const androidSignalAPI = {
       const offer = await androidRPC('p2p.hole_punch_req', {
         family_id: familyID,
         client_udp_port: prepared.udp_port,
+        client_udp_ports: Array.isArray(prepared.udp_ports) ? prepared.udp_ports : [prepared.udp_port],
         preferred_mode: options.mode,
         virtual_cidr: options.virtual_cidr || '',
         client_virtual_mac: prepared.client_virtual_mac,

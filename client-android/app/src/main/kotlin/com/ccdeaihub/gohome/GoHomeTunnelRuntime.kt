@@ -101,6 +101,7 @@ object GoHomeTunnelRuntime {
         android.util.Log.i("GoHomeTunnel", "Prepared UDP sockets localPorts=${preparedSockets.map { it.localPort }}")
         return JSONObject()
             .put("udp_port", prepared.localPort)
+            .put("udp_ports", JSONArray(preparedSockets.map { it.localPort }))
             .put("client_virtual_mac", virtualMAC(deviceID))
     }
 
