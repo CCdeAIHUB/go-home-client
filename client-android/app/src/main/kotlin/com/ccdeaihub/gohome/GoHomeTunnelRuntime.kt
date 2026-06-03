@@ -51,7 +51,6 @@ object GoHomeTunnelRuntime {
     private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 192
     private const val PUNCH_TIMEOUT_MS = 28_000L
     private const val FALLBACK_PUNCH_TIMEOUT_MS = 40_000L
-    private const val NO_PROBE_FAST_RETRY_MS = 12_000L
     private const val PUNCH_SOCKET_COUNT = 8
     private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
     private const val FULL_PORT_SWEEP_BATCH_SIZE = 1024
@@ -218,10 +217,6 @@ object GoHomeTunnelRuntime {
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
             drainPunchReplies(untilNextHello)?.let { return it }
             attempt += 1
-            if (!fallbackSweep && probesSeen == 0 && System.currentTimeMillis() - startedAt >= NO_PROBE_FAST_RETRY_MS) {
-                android.util.Log.i("GoHomeTunnel", "No UDP probes seen for session $currentSessionID after ${System.currentTimeMillis() - startedAt}ms; switching to fallback punch")
-                break
-            }
         }
         synchronized(lock) {
             lastError = "UDP direct tunnel handshake timed out (attempts=$attempt probes=$probesSeen frames=$framesSeen sent=$uploaded received=$downloaded maxWindow=$AGGRESSIVE_PORT_PREDICTION_WINDOW)"
