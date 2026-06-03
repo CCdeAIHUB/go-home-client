@@ -11,6 +11,7 @@ import {
   Home,
   Loader2,
   Monitor,
+  Moon,
   Network,
   PlugZap,
   Radio,
@@ -20,6 +21,7 @@ import {
   Settings,
   ShieldCheck,
   Smartphone,
+  Sun,
   Trash2,
   Users,
   Wifi,
@@ -59,6 +61,8 @@ const state = reactive({
   backPage: null
 })
 
+const theme = ref('system')
+const activeTheme = ref('light')
 const currentFamily = computed(() => state.selectedFamily)
 const signalConnected = computed(() => state.status.websocket === 'connected' || state.families.length > 0)
 const tunnelConnected = computed(() => state.status.udp === 'connected' && Boolean(state.tunnel))
@@ -72,6 +76,11 @@ let statusTimer = null
 let offServerEvent = null
 
 onMounted(() => {
+  theme.value = localStorage.getItem('go-home-client-theme') || 'system'
+  applyTheme(theme.value)
+  window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (theme.value === 'system') applyTheme('system')
+  })
   loadSavedServers()
   // Auto-fill last used server on startup
   const lastServer = state.savedServers.find(s => s.server)
@@ -94,6 +103,23 @@ onMounted(() => {
     }
   })
 })
+
+function applyTheme(value) {
+  activeTheme.value = value === 'system'
+    ? (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+    : value
+  document.documentElement.dataset.theme = activeTheme.value
+}
+
+function setTheme(value) {
+  theme.value = value
+  localStorage.setItem('go-home-client-theme', value)
+  applyTheme(value)
+}
+
+function toggleTheme() {
+  setTheme(activeTheme.value === 'dark' ? 'light' : 'dark')
+}
 
 onBeforeUnmount(() => {
   window.clearInterval(statusTimer)
@@ -330,6 +356,11 @@ function timeAgo(ts) {
           <button :class="{ active: state.page === 'settings' }" class="nav-button" @click="navigateToSettings" title="设置">
             <Settings :size="18" />
             <span>设置</span>
+          </button>
+          <button class="nav-button" type="button" :title="activeTheme === 'dark' ? '切换浅色模式' : '切换深色模式'" @click="toggleTheme">
+            <Sun v-if="activeTheme === 'dark'" :size="18" />
+            <Moon v-else :size="18" />
+            <span>{{ activeTheme === 'dark' ? '浅色' : '深色' }}</span>
           </button>
         </nav>
       </div>

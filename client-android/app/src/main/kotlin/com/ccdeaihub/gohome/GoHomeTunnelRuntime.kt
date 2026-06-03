@@ -49,8 +49,8 @@ object GoHomeTunnelRuntime {
     private const val PORT_PREDICTION_WINDOW = 16
     private const val AGGRESSIVE_PORT_PREDICTION_WINDOW = 512
     private const val MAX_PUNCH_TARGETS_PER_ATTEMPT = 256
-    private const val PUNCH_TIMEOUT_MS = 45_000L
-    private const val FALLBACK_PUNCH_TIMEOUT_MS = 75_000L
+    private const val PUNCH_TIMEOUT_MS = 60_000L
+    private const val FALLBACK_PUNCH_TIMEOUT_MS = 90_000L
     private const val PUNCH_SOCKET_COUNT = 8
     private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
     private const val FULL_PORT_SWEEP_BATCH_SIZE = 1024
