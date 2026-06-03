@@ -143,6 +143,52 @@ object GoHomeTunnelRuntime {
             lastError = ""
         }
 
+        fun handlePunchPacket(packet: ReceivedPacket): JSONObject? {
+            try {
+                when (packetKind(packet.bytes)) {
+                    PACKET_PROBE -> {
+                        if (controlJSON(packet.bytes).optString("session_id") == currentSessionID) {
+                            probesSeen += 1
+                            android.util.Log.i("GoHomeTunnel", "Received UDP probe for session $currentSessionID from ${packet.source}")
+                            currentPeer = packet.source
+                            addCandidate(candidates, currentPeer)
+                            synchronized(lock) { peer = currentPeer }
+                            send(packet.socket, currentPeer, hello)
+                        }
+                    }
+                    PACKET_FRAME -> {
+                        val frame = openFrame(currentKey, packet.bytes)
+                        if (frame.sessionID == currentSessionID && frame.type == FRAME_READY && replay.accept(frame.sequence)) {
+                            framesSeen += 1
+                            android.util.Log.i("GoHomeTunnel", "Received UDP ready for session $currentSessionID from ${packet.source}")
+                            synchronized(lock) {
+                                socket = packet.socket
+                                punchSockets.filter { it !== packet.socket }.forEach { it.close() }
+                                punchSockets = mutableListOf(packet.socket)
+                                peer = packet.source
+                                udpConnected = true
+                                running = true
+                            }
+                            val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
+                            startVpn(activity, ready, mode, virtualCIDR)
+                            startUDPLoop(packet.socket, currentKey, currentSessionID)
+                            startKeepaliveLoop()
+                            return readyToView(ready, mode, virtualCIDR)
+                        }
+                    }
+                    PACKET_REGISTER_ACK -> Unit
+                }
+            } catch (e: Exception) {
+                android.util.Log.d("GoHomeTunnel", "ignore UDP packet during punch: ${e.message}")
+            }
+            return null
+        }
+
+        fun drainPunchReplies(timeoutMillis: Int): JSONObject? {
+            val packet = receiveAny(currentSockets, timeoutMillis) ?: return null
+            return handlePunchPacket(packet)
+        }
+
         while (System.currentTimeMillis() < deadline) {
             drainPunchCandidates(currentSessionID, candidates)
             val snapshot = punchCandidateBatch(candidates, attempt)
@@ -155,54 +201,22 @@ object GoHomeTunnelRuntime {
                 lastWindow = window
             }
             for (sourceSocket in currentSockets) {
-                for (candidate in snapshot) {
+                for ((index, candidate) in snapshot.withIndex()) {
                     send(sourceSocket, candidate, hello)
+                    if (index % 32 == 31) {
+                        drainPunchReplies(3)?.let { return it }
+                    }
                 }
+                drainPunchReplies(8)?.let { return it }
             }
-            for (candidate in sweepCandidates) {
+            for ((index, candidate) in sweepCandidates.withIndex()) {
                 send(sweepSocket, candidate, hello)
+                if (index % 64 == 63) {
+                    drainPunchReplies(2)?.let { return it }
+                }
             }
             val untilNextHello = min(punchInterval(attempt), (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(1))
-            val packet = receiveAny(currentSockets, untilNextHello)
-            if (packet != null) {
-                try {
-                    when (packetKind(packet.bytes)) {
-                        PACKET_PROBE -> {
-                            if (controlJSON(packet.bytes).optString("session_id") == currentSessionID) {
-                                probesSeen += 1
-                                android.util.Log.i("GoHomeTunnel", "Received UDP probe for session $currentSessionID from ${packet.source}")
-                                currentPeer = packet.source
-                                addCandidate(candidates, currentPeer)
-                                synchronized(lock) { peer = currentPeer }
-                                send(packet.socket, currentPeer, hello)
-                            }
-                        }
-                        PACKET_FRAME -> {
-                            val frame = openFrame(currentKey, packet.bytes)
-                            if (frame.sessionID == currentSessionID && frame.type == FRAME_READY && replay.accept(frame.sequence)) {
-                                framesSeen += 1
-                                android.util.Log.i("GoHomeTunnel", "Received UDP ready for session $currentSessionID from ${packet.source}")
-                                synchronized(lock) {
-                                    socket = packet.socket
-                                    punchSockets.filter { it !== packet.socket }.forEach { it.close() }
-                                    punchSockets = mutableListOf(packet.socket)
-                                    peer = packet.source
-                                    udpConnected = true
-                                    running = true
-                                }
-                                val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
-                                startVpn(activity, ready, mode, virtualCIDR)
-                                startUDPLoop(packet.socket, currentKey, currentSessionID)
-                                startKeepaliveLoop()
-                                return readyToView(ready, mode, virtualCIDR)
-                            }
-                        }
-                        PACKET_REGISTER_ACK -> Unit
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.d("GoHomeTunnel", "ignore UDP packet during punch: ${e.message}")
-                }
-            }
+            drainPunchReplies(untilNextHello)?.let { return it }
             attempt += 1
             if (!fallbackSweep && probesSeen == 0 && System.currentTimeMillis() - startedAt >= NO_PROBE_FAST_RETRY_MS) {
                 android.util.Log.i("GoHomeTunnel", "No UDP probes seen for session $currentSessionID after ${System.currentTimeMillis() - startedAt}ms; switching to fallback punch")
