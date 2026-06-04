@@ -74,13 +74,21 @@ const activeStep = computed(() => {
 
 let statusTimer = null
 let offServerEvent = null
+let themeMediaQuery = null
+let themeMediaHandler = null
 
 onMounted(() => {
   theme.value = localStorage.getItem('go-home-client-theme') || 'system'
   applyTheme(theme.value)
-  window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  themeMediaQuery = window.matchMedia?.('(prefers-color-scheme: dark)')
+  themeMediaHandler = () => {
     if (theme.value === 'system') applyTheme('system')
-  })
+  }
+  if (themeMediaQuery?.addEventListener) {
+    themeMediaQuery.addEventListener('change', themeMediaHandler)
+  } else if (themeMediaQuery?.addListener) {
+    themeMediaQuery.addListener(themeMediaHandler)
+  }
   loadSavedServers()
   // Auto-fill last used server on startup
   const lastServer = state.savedServers.find(s => s.server)
@@ -123,6 +131,11 @@ function toggleTheme() {
 
 onBeforeUnmount(() => {
   window.clearInterval(statusTimer)
+  if (themeMediaQuery?.removeEventListener && themeMediaHandler) {
+    themeMediaQuery.removeEventListener('change', themeMediaHandler)
+  } else if (themeMediaQuery?.removeListener && themeMediaHandler) {
+    themeMediaQuery.removeListener(themeMediaHandler)
+  }
   if (offServerEvent) offServerEvent()
 })
 
