@@ -55,6 +55,8 @@ object GoHomeTunnelRuntime {
     private const val FULL_PORT_SWEEP_START_ATTEMPT = 32
     private const val FULL_PORT_SWEEP_BATCH_SIZE = 1024
     private const val FULL_PORT_SWEEP_SOCKET_INDEX = 1
+    private const val KEEPALIVE_INTERVAL_MS = 3_000L
+    private const val TUNNEL_STALE_TIMEOUT_MS = 30_000L
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
     private val lock = Object()
@@ -72,6 +74,8 @@ object GoHomeTunnelRuntime {
     private var uploaded = 0L
     private var downloaded = 0L
     private var tunnelRTTMS = 0L
+    private var lastTunnelPongAt = 0L
+    private var lastTunnelFrameAt = 0L
     private var tunnelFd: ParcelFileDescriptor? = null
     private var tunInput: FileInputStream? = null
     private var tunOutput: FileOutputStream? = null
@@ -96,6 +100,8 @@ object GoHomeTunnelRuntime {
             uploaded = 0
             downloaded = 0
             tunnelRTTMS = 0
+            lastTunnelPongAt = 0
+            lastTunnelFrameAt = 0
         }
         android.util.Log.i("GoHomeTunnel", "Prepared UDP sockets localPorts=${preparedSockets.map { it.localPort }}")
         return JSONObject()
@@ -167,6 +173,8 @@ object GoHomeTunnelRuntime {
                                 peer = packet.source
                                 udpConnected = true
                                 running = true
+                                lastTunnelFrameAt = System.currentTimeMillis()
+                                lastTunnelPongAt = lastTunnelFrameAt
                             }
                             val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
                             startVpn(activity, ready, mode, virtualCIDR)
@@ -247,6 +255,13 @@ object GoHomeTunnelRuntime {
         }
     }
 
+    fun handleVpnServiceStopped() {
+        val shouldClose = synchronized(lock) { running || udpConnected || tunnelFd != null }
+        if (shouldClose) {
+            closeTunnelResources("Android VPN service stopped", clearIdentity = false)
+        }
+    }
+
     fun addPunchCandidate(currentSessionID: String, endpoint: String) {
         val candidate = runCatching { parseEndpoint(endpoint) }.getOrNull() ?: return
         synchronized(lock) {
@@ -276,47 +291,77 @@ object GoHomeTunnelRuntime {
     }
 
     fun status(): JSONObject {
+        val now = System.currentTimeMillis()
         synchronized(lock) {
+            val connected = udpConnected && !isTunnelStaleLocked(now)
             return JSONObject()
-                .put("udp", if (udpConnected) "connected" else "idle")
-                .put("tunnel_rtt_ms", tunnelRTTMS)
+                .put("udp", if (connected) "connected" else "idle")
+                .put("tunnel_rtt_ms", if (connected) tunnelRTTMS else 0)
+                .put("last_pong_age_ms", if (lastTunnelPongAt > 0) now - lastTunnelPongAt else JSONObject.NULL)
                 .put("last_error", lastError)
         }
     }
 
     fun stats(): JSONObject {
+        val now = System.currentTimeMillis()
         synchronized(lock) {
+            val connected = udpConnected && !isTunnelStaleLocked(now)
             return JSONObject()
                 .put("up", uploaded)
                 .put("down", downloaded)
                 .put("loss", 0)
-                .put("tunnel_rtt_ms", tunnelRTTMS)
+                .put("tunnel_rtt_ms", if (connected) tunnelRTTMS else 0)
+                .put("last_pong_age_ms", if (lastTunnelPongAt > 0) now - lastTunnelPongAt else JSONObject.NULL)
         }
     }
 
     fun stop(activity: Activity?) {
+        closeTunnelResources("user disconnected", clearIdentity = true)
+        activity?.stopService(Intent(activity, GoHomeVpnService::class.java))
+    }
+
+    private fun closeTunnelResources(reason: String, clearIdentity: Boolean) {
+        val socketsToClose: List<DatagramSocket>
+        val currentSocket: DatagramSocket?
+        val currentInput: FileInputStream?
+        val currentOutput: FileOutputStream?
+        val currentTunnel: ParcelFileDescriptor?
         synchronized(lock) {
             running = false
             udpConnected = false
-            sessionID = ""
-            sessionKey = null
-            peer = null
+            if (clearIdentity) {
+                sessionID = ""
+                sessionKey = null
+                peer = null
+                pendingPunchCandidates.clear()
+            }
             sendSequence = 0
             replay = ReplayWindow()
             tunnelRTTMS = 0
-            pendingPunchCandidates.clear()
-            punchSockets.forEach { it.close() }
+            lastTunnelPongAt = 0
+            lastTunnelFrameAt = 0
+            if (reason.isNotBlank() && reason != "user disconnected") {
+                lastError = reason
+            }
+            socketsToClose = punchSockets.toList()
             punchSockets = mutableListOf()
-            socket?.close()
+            currentSocket = socket
             socket = null
-            tunInput?.close()
+            currentInput = tunInput
             tunInput = null
-            tunOutput?.close()
+            currentOutput = tunOutput
             tunOutput = null
-            tunnelFd?.close()
+            currentTunnel = tunnelFd
             tunnelFd = null
         }
-        activity?.stopService(Intent(activity, GoHomeVpnService::class.java))
+        socketsToClose.forEach { runCatching { it.close() } }
+        runCatching { currentSocket?.close() }
+        runCatching { currentInput?.close() }
+        runCatching { currentOutput?.close() }
+        runCatching { currentTunnel?.close() }
+        if (reason.isNotBlank() && reason != "user disconnected") {
+            android.util.Log.w("GoHomeTunnel", reason)
+        }
     }
 
     fun localNetworkConflict(cidr: String): Boolean {
@@ -385,6 +430,7 @@ object GoHomeTunnelRuntime {
                     synchronized(lock) {
                         peer = packet.source
                         downloaded += packet.bytes.size
+                        lastTunnelFrameAt = System.currentTimeMillis()
                     }
                     when (frame.type) {
                         FRAME_READY -> Unit
@@ -403,11 +449,24 @@ object GoHomeTunnelRuntime {
             while (synchronized(lock) { running }) {
                 try {
                     sendTunnelPing()
-                    Thread.sleep(5_000)
+                    val staleReason = synchronized(lock) {
+                        val now = System.currentTimeMillis()
+                        if (udpConnected && isTunnelStaleLocked(now)) {
+                            "UDP tunnel heartbeat timed out after ${(now - lastTunnelPongAt) / 1_000}s without pong"
+                        } else {
+                            ""
+                        }
+                    }
+                    if (staleReason.isNotBlank()) {
+                        closeTunnelResources(staleReason, clearIdentity = false)
+                        return@thread
+                    }
+                    Thread.sleep(KEEPALIVE_INTERVAL_MS)
                 } catch (_: InterruptedException) {
                     return@thread
                 } catch (error: Exception) {
                     setError(error.message ?: "keepalive failed")
+                    Thread.sleep(KEEPALIVE_INTERVAL_MS)
                 }
             }
         }
@@ -426,7 +485,10 @@ object GoHomeTunnelRuntime {
         val sentAt = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).long
         val rtt = System.currentTimeMillis() - sentAt
         if (rtt !in 0..60_000) return
-        synchronized(lock) { tunnelRTTMS = rtt }
+        synchronized(lock) {
+            tunnelRTTMS = rtt
+            lastTunnelPongAt = System.currentTimeMillis()
+        }
     }
 
     private fun startTunReadLoop() {
@@ -476,6 +538,10 @@ object GoHomeTunnelRuntime {
     private fun send(targetSocket: DatagramSocket, target: InetSocketAddress, payload: ByteArray) {
         targetSocket.send(DatagramPacket(payload, payload.size, target))
         synchronized(lock) { uploaded += payload.size }
+    }
+
+    private fun isTunnelStaleLocked(now: Long): Boolean {
+        return lastTunnelPongAt > 0 && now - lastTunnelPongAt > TUNNEL_STALE_TIMEOUT_MS
     }
 
     private fun receive(targetSocket: DatagramSocket, timeoutMillis: Int): ReceivedPacket? {

@@ -8,6 +8,7 @@ import android.util.Log
 
 class GoHomeVpnService : VpnService() {
     private var tunnel: ParcelFileDescriptor? = null
+    private var establishedTunnel = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         GoHomeTunnelRuntime.protectSocket(this)
@@ -33,6 +34,7 @@ class GoHomeVpnService : VpnService() {
         // Close old tunnel if any
         tunnel?.close()
         tunnel = null
+        establishedTunnel = false
 
         // Build and establish the VPN interface
         val newTunnel = try {
@@ -56,13 +58,19 @@ class GoHomeVpnService : VpnService() {
 
         Log.i(TAG, "VPN established: address=$virtualAddress route=$homeAddress/$homePrefix")
         tunnel = newTunnel
+        establishedTunnel = true
         GoHomeTunnelRuntime.attachTunnel(tunnel)
         return START_STICKY
     }
 
     override fun onDestroy() {
+        val hadEstablishedTunnel = establishedTunnel
+        establishedTunnel = false
         tunnel?.close()
         tunnel = null
+        if (hadEstablishedTunnel) {
+            GoHomeTunnelRuntime.handleVpnServiceStopped()
+        }
         super.onDestroy()
     }
 
