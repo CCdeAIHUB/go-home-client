@@ -387,7 +387,7 @@ object GoHomeTunnelRuntime {
         }
         val routeCIDR = if (mode == "mapped") virtualCIDR else realCIDR
         val clientAddress = if (mode == "mapped") mappedAddress(homeIP, realCIDR, virtualCIDR) else homeIP
-        val dnsServer = gatewayAddress(realCIDR)
+        val dnsServer = vpnDnsServers(realCIDR, routePolicy)
         val intent = Intent(activity, GoHomeVpnService::class.java)
             .putExtra(GoHomeVpnService.EXTRA_HOME_CIDR, routeCIDR)
             .putExtra(GoHomeVpnService.EXTRA_VIRTUAL_ADDRESS, clientAddress)
@@ -688,6 +688,15 @@ object GoHomeTunnelRuntime {
         val bytes = prefix.network.copyOf()
         bytes[3] = 1
         return InetAddress.getByAddress(bytes).hostAddress ?: ""
+    }
+
+    private fun vpnDnsServers(realCIDR: String, routePolicy: String): String {
+        val gateway = gatewayAddress(realCIDR)
+        if (normalizeRoutePolicy(routePolicy) != "full") return gateway
+        return listOf("223.5.5.5", "119.29.29.29", gateway)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString(",")
     }
 
     private fun peerBaseCandidates(peer: JSONObject): MutableList<InetSocketAddress> {

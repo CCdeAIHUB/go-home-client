@@ -46,10 +46,17 @@ class GoHomeVpnService : VpnService() {
                 .addAddress(virtualAddress, 32)
             if (routePolicy == ROUTE_POLICY_FULL) {
                 builder.addRoute("0.0.0.0", 0)
+                dnsServer.split(",")
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .forEach {
+                        builder.addDnsServer(it)
+                    }
+            } else {
                 if (dnsServer.isNotBlank()) {
                     builder.addDnsServer(dnsServer)
                 }
-            } else {
                 builder.addRoute(homeAddress, homePrefix)
             }
             builder.establish()
@@ -65,7 +72,7 @@ class GoHomeVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        Log.i(TAG, "VPN established: address=$virtualAddress route=$homeAddress/$homePrefix policy=$routePolicy")
+        Log.i(TAG, "VPN established: address=$virtualAddress route=$homeAddress/$homePrefix policy=$routePolicy dns=$dnsServer")
         tunnel = newTunnel
         establishedTunnel = true
         GoHomeTunnelRuntime.attachTunnel(tunnel)
