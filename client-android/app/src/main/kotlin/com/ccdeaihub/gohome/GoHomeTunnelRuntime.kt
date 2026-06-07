@@ -110,7 +110,7 @@ object GoHomeTunnelRuntime {
             .put("client_virtual_mac", virtualMAC(deviceID))
     }
 
-    fun connect(activity: Activity, rawOffer: String, mode: String, virtualCIDR: String): JSONObject {
+    fun connect(activity: Activity, rawOffer: String, mode: String, virtualCIDR: String, routePolicy: String): JSONObject {
         val offer = JSONObject(rawOffer)
         val currentSockets = synchronized(lock) { punchSockets.toList() }
         if (currentSockets.isEmpty()) throw IllegalStateException("UDP socket is not prepared")
@@ -177,10 +177,10 @@ object GoHomeTunnelRuntime {
                                 lastTunnelPongAt = lastTunnelFrameAt
                             }
                             val ready = JSONObject(frame.payload.toString(Charsets.UTF_8))
-                            startVpn(activity, ready, mode, virtualCIDR)
+                            startVpn(activity, ready, mode, virtualCIDR, routePolicy)
                             startUDPLoop(packet.socket, currentKey, currentSessionID)
                             startKeepaliveLoop()
-                            return readyToView(ready, mode, virtualCIDR)
+                            return readyToView(ready, mode, virtualCIDR, routePolicy)
                         }
                     }
                     PACKET_REGISTER_ACK -> Unit
@@ -379,7 +379,7 @@ object GoHomeTunnelRuntime {
         return false
     }
 
-    private fun startVpn(activity: Activity, ready: JSONObject, mode: String, virtualCIDR: String) {
+    private fun startVpn(activity: Activity, ready: JSONObject, mode: String, virtualCIDR: String, routePolicy: String) {
         val homeIP = ready.optString("client_home_ip")
         val realCIDR = ready.optString("lan_cidr")
         if (homeIP.isBlank() || realCIDR.isBlank()) {
@@ -390,6 +390,7 @@ object GoHomeTunnelRuntime {
         val intent = Intent(activity, GoHomeVpnService::class.java)
             .putExtra(GoHomeVpnService.EXTRA_HOME_CIDR, routeCIDR)
             .putExtra(GoHomeVpnService.EXTRA_VIRTUAL_ADDRESS, clientAddress)
+            .putExtra(GoHomeVpnService.EXTRA_ROUTE_POLICY, normalizeRoutePolicy(routePolicy))
         // Must start the VPN service on the UI thread for Android compatibility
         val latch = java.util.concurrent.CountDownLatch(1)
         activity.runOnUiThread {
@@ -405,12 +406,13 @@ object GoHomeTunnelRuntime {
         Thread.sleep(300)
     }
 
-    private fun readyToView(ready: JSONObject, mode: String, virtualCIDR: String): JSONObject {
+    private fun readyToView(ready: JSONObject, mode: String, virtualCIDR: String, routePolicy: String): JSONObject {
         val realCIDR = ready.optString("lan_cidr")
         val homeIP = ready.optString("client_home_ip")
         val clientAddress = if (mode == "mapped") mappedAddress(homeIP, realCIDR, virtualCIDR) else homeIP
         return JSONObject()
             .put("mode", mode)
+            .put("route_policy", normalizeRoutePolicy(routePolicy))
             .put("family_lan_cidr", realCIDR)
             .put("virtual_cidr", virtualCIDR)
             .put("client_home_ip", homeIP)
@@ -673,6 +675,10 @@ object GoHomeTunnelRuntime {
         val bytes = virtual.network.copyOf()
         bytes[3] = home.address[3]
         return InetAddress.getByAddress(bytes).hostAddress ?: throw IllegalArgumentException("virtual client IP is invalid")
+    }
+
+    private fun normalizeRoutePolicy(routePolicy: String): String {
+        return if (routePolicy == "full") "full" else "lan"
     }
 
     private fun peerBaseCandidates(peer: JSONObject): MutableList<InetSocketAddress> {

@@ -573,6 +573,45 @@ label {
   font-size: 12px;
 }
 
+.route-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.route-policy-grid label {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 9px;
+  align-items: center;
+  min-height: 74px;
+  border: 1px solid #d8e1de;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  padding: 12px;
+}
+
+.route-policy-grid label.selected {
+  border-color: #14756b;
+  box-shadow: 0 0 0 3px rgba(20, 117, 107, 0.11);
+}
+
+.route-policy-grid input {
+  width: 15px;
+  min-height: 15px;
+}
+
+.route-policy-grid span {
+  display: grid;
+  gap: 2px;
+}
+
+.route-policy-grid small {
+  color: #778481;
+  font-size: 12px;
+}
+
 .action-summary {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -687,6 +726,10 @@ label {
   border-bottom: 1px solid #e4ebe9;
   background: #fff;
   padding: 11px 13px;
+}
+
+.device-map strong {
+  color: #273c39;
 }
 
 .device-map small {
@@ -903,6 +946,10 @@ label {
     min-height: 128px;
   }
 
+  .route-policy-grid {
+    grid-template-columns: 1fr;
+  }
+
   .link-overview {
     grid-template-columns: auto 1fr;
   }
@@ -969,7 +1016,9 @@ label {
 [data-theme='dark'] .connection-facts,
 [data-theme='dark'] .settings-row,
 [data-theme='dark'] .link-overview,
-[data-theme='dark'] .mode-grid label {
+[data-theme='dark'] .mode-grid label,
+[data-theme='dark'] .route-policy-grid label,
+[data-theme='dark'] .device-map article {
   border-color: #2b3935;
   background: #151c1a;
 }
@@ -1001,6 +1050,7 @@ label {
 [data-theme='dark'] .metric-grid strong,
 [data-theme='dark'] .family-main,
 [data-theme='dark'] .device-map h3,
+[data-theme='dark'] .device-map strong,
 [data-theme='dark'] .sub-section h3 {
   color: #f4faf8;
 }
@@ -1017,6 +1067,7 @@ label {
 [data-theme='dark'] .family-info small,
 [data-theme='dark'] .context-strip small,
 [data-theme='dark'] .mode-grid span,
+[data-theme='dark'] .route-policy-grid small,
 [data-theme='dark'] .action-summary span,
 [data-theme='dark'] .device-map small,
 [data-theme='dark'] .empty-text,
@@ -1055,11 +1106,13 @@ label {
 }
 
 [data-theme='dark'] .mode-grid label.selected,
+[data-theme='dark'] .route-policy-grid label.selected,
 [data-theme='dark'] .flow-steps li.active {
   border-color: #63d7bd;
 }
 
-[data-theme='dark'] .mode-grid label.selected {
+[data-theme='dark'] .mode-grid label.selected,
+[data-theme='dark'] .route-policy-grid label.selected {
   box-shadow: 0 0 0 3px rgba(99, 215, 189, 0.13);
 }
 

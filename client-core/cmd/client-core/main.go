@@ -28,6 +28,7 @@ func main() {
 	udpPort := flag.Int("udp-port", 47778, "local UDP port for P2P hole punching")
 	mode := flag.String("mode", "real", "preferred network mode: real or mapped")
 	virtualCIDR := flag.String("virtual-cidr", "", "mapped mode client-side virtual CIDR")
+	routePolicy := flag.String("route-policy", "lan", "route policy: lan or full")
 	virtualMAC := flag.String("virtual-mac", "", "client virtual MAC for the home lease")
 	identityFile := flag.String("identity-file", defaultIdentityFile(), "SM2 identity persistence file")
 	timeout := flag.Duration("timeout", 20*time.Second, "direct UDP handshake timeout")
@@ -98,7 +99,7 @@ func main() {
 		return
 	}
 
-	offer, err := requestOffer(ctx, rpc, *familyID, *udpPort, *mode, *virtualCIDR, *virtualMAC)
+	offer, err := requestOffer(ctx, rpc, *familyID, *udpPort, *mode, *virtualCIDR, *routePolicy, *virtualMAC)
 	if err != nil {
 		log.Fatalf("request hole punch: %v", err)
 	}
@@ -151,12 +152,13 @@ func printFamilies(families []protocol.Family) {
 	}
 }
 
-func requestOffer(ctx context.Context, rpc *rpcClient, familyID int64, udpPort int, mode, virtualCIDR, virtualMAC string) (protocol.HolePunchOffer, error) {
+func requestOffer(ctx context.Context, rpc *rpcClient, familyID int64, udpPort int, mode, virtualCIDR, routePolicy, virtualMAC string) (protocol.HolePunchOffer, error) {
 	raw, err := rpc.Call(ctx, protocol.ActionP2PHolePunchReq, protocol.HolePunchRequestParams{
 		FamilyID:         familyID,
 		ClientUDPPort:    udpPort,
 		PreferredMode:    mode,
 		VirtualCIDR:      virtualCIDR,
+		RoutePolicy:      routePolicy,
 		ClientVirtualMAC: virtualMAC,
 	})
 	if err != nil {

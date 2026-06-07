@@ -230,11 +230,11 @@ class MainActivity : Activity() {
         private var tunnelCallbackSeq = 0
 
         @JavascriptInterface
-        fun connectTunnelAsync(offer: String, mode: String, virtualCIDR: String): String {
+        fun connectTunnelAsync(offer: String, mode: String, virtualCIDR: String, routePolicy: String): String {
             val callbackId = "tunnel-${tunnelCallbackSeq++}"
             Thread {
                 val jsonResult = try {
-                    GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+                    GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR, routePolicy).toString()
                 } catch (e: Exception) {
                     """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
                 }
@@ -255,12 +255,12 @@ class MainActivity : Activity() {
 
         // Keep sync version as fallback (not used by new UI)
         @JavascriptInterface
-        fun connectTunnel(offer: String, mode: String, virtualCIDR: String): String {
+        fun connectTunnel(offer: String, mode: String, virtualCIDR: String, routePolicy: String): String {
             val result = arrayOf<String>("")
             val latch = CountDownLatch(1)
             Thread {
                 try {
-                    result[0] = GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR).toString()
+                    result[0] = GoHomeTunnelRuntime.connect(activity, offer, mode, virtualCIDR, routePolicy).toString()
                 } catch (e: Exception) {
                     result[0] = """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
                 }

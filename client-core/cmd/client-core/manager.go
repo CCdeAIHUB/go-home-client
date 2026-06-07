@@ -44,6 +44,7 @@ type managedTunnel struct {
 	offer     protocol.HolePunchOffer
 	ready     tunnel.Ready
 	mode      string
+	route     string
 	virtual   string
 	link      *virtualLink
 	cancel    context.CancelFunc
@@ -54,6 +55,7 @@ type managedTunnel struct {
 type tunnelOptions struct {
 	Mode             string `json:"mode"`
 	VirtualCIDR      string `json:"virtual_cidr"`
+	RoutePolicy      string `json:"route_policy"`
 	ClientVirtualMAC string `json:"client_virtual_mac"`
 }
 
@@ -61,6 +63,7 @@ type tunnelView struct {
 	SessionID    string             `json:"session_id"`
 	FamilyID     int64              `json:"family_id"`
 	Mode         string             `json:"mode"`
+	RoutePolicy  string             `json:"route_policy"`
 	ClientHomeIP string             `json:"client_home_ip,omitempty"`
 	VirtualCIDR  string             `json:"virtual_cidr,omitempty"`
 	LANCIDR      string             `json:"lan_cidr,omitempty"`
@@ -225,8 +228,15 @@ func (m *clientManager) ConnectFamily(ctx context.Context, familyID int64, optio
 	if mode == "" {
 		mode = "real"
 	}
+	routePolicy := options.RoutePolicy
+	if routePolicy == "" {
+		routePolicy = "lan"
+	}
 	if mode != "real" && mode != "mapped" {
 		return tunnelView{}, fmt.Errorf("unsupported network mode %q", mode)
+	}
+	if routePolicy != "lan" && routePolicy != "full" {
+		return tunnelView{}, fmt.Errorf("unsupported route policy %q", routePolicy)
 	}
 	if mode == "mapped" && options.VirtualCIDR == "" {
 		return tunnelView{}, errors.New("virtual CIDR is required for mapped mode")
@@ -245,7 +255,7 @@ func (m *clientManager) ConnectFamily(ctx context.Context, familyID int64, optio
 	}
 
 	m.stopTunnel()
-	offer, err := requestOffer(ctx, rpc, familyID, m.udpPort, mode, options.VirtualCIDR, options.ClientVirtualMAC)
+	offer, err := requestOffer(ctx, rpc, familyID, m.udpPort, mode, options.VirtualCIDR, routePolicy, options.ClientVirtualMAC)
 	if err != nil {
 		m.setRPCError(err)
 		return tunnelView{}, err
@@ -275,12 +285,13 @@ func (m *clientManager) ConnectFamily(ctx context.Context, familyID int64, optio
 		offer:     offer,
 		ready:     ready,
 		mode:      mode,
+		route:     routePolicy,
 		virtual:   options.VirtualCIDR,
 		cancel:    cancel,
 		connected: time.Now(),
 	}
 	if ready.ClientHomeIP != "" {
-		link, err := newVirtualLink(runCtx, client, mode, ready.ClientHomeIP, ready.LANCIDR, options.VirtualCIDR)
+		link, err := newVirtualLink(runCtx, client, mode, routePolicy, ready.ClientHomeIP, ready.LANCIDR, options.VirtualCIDR)
 		if err != nil {
 			cancel()
 			return tunnelView{}, err
@@ -669,6 +680,7 @@ func (t *managedTunnel) view() tunnelView {
 		SessionID:    t.offer.SessionID,
 		FamilyID:     t.offer.FamilyID,
 		Mode:         t.mode,
+		RoutePolicy:  t.route,
 		ClientHomeIP: t.ready.ClientHomeIP,
 		VirtualCIDR:  t.virtual,
 		LANCIDR:      t.ready.LANCIDR,

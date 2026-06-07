@@ -42,6 +42,8 @@ const state = reactive({
   selectedFamily: null,
   conflict: null,
   networkMode: 'real',
+  routePolicy: 'lan',
+  connectCountdown: 0,
   virtualCIDR: '192.168.6.0/24',
   tunnel: null,
   status: { websocket: 'idle', udp: 'idle', grace_seconds: 0 },
@@ -73,6 +75,7 @@ const activeStep = computed(() => {
 })
 
 let statusTimer = null
+let connectCountdownTimer = null
 let offServerEvent = null
 let themeMediaQuery = null
 let themeMediaHandler = null
@@ -131,6 +134,7 @@ function toggleTheme() {
 
 onBeforeUnmount(() => {
   window.clearInterval(statusTimer)
+  stopConnectCountdown()
   if (themeMediaQuery?.removeEventListener && themeMediaHandler) {
     themeMediaQuery.removeEventListener('change', themeMediaHandler)
   } else if (themeMediaQuery?.removeListener && themeMediaHandler) {
@@ -201,6 +205,7 @@ async function chooseFamily(family) {
   state.selectedFamily = family
   state.conflict = await backend.checkNetworkConflict(family)
   state.networkMode = state.conflict?.conflict ? 'mapped' : 'real'
+  state.routePolicy = 'lan'
   state.page = 'network'
 }
 
@@ -208,10 +213,12 @@ async function connectFamily() {
   if (!state.selectedFamily) return
   state.error = ''
   state.connecting = true
+  startConnectCountdown()
   try {
     const options = {
       mode: state.networkMode,
-      virtual_cidr: state.networkMode === 'mapped' ? state.virtualCIDR : ''
+      virtual_cidr: state.networkMode === 'mapped' ? state.virtualCIDR : '',
+      route_policy: state.routePolicy
     }
     state.tunnel = await backend.connectFamily(state.selectedFamily.id, options)
     state.status = await backend.getTunnelStatus()
@@ -220,8 +227,26 @@ async function connectFamily() {
   } catch (error) {
     state.error = error.message || '当前网络环境无法穿透，直连失败'
   } finally {
+    stopConnectCountdown()
     state.connecting = false
   }
+}
+
+function startConnectCountdown() {
+  stopConnectCountdown()
+  state.connectCountdown = 160
+  connectCountdownTimer = window.setInterval(() => {
+    state.connectCountdown = Math.max(0, state.connectCountdown - 1)
+    if (state.connectCountdown === 0) stopConnectCountdown()
+  }, 1000)
+}
+
+function stopConnectCountdown() {
+  if (connectCountdownTimer) {
+    window.clearInterval(connectCountdownTimer)
+    connectCountdownTimer = null
+  }
+  state.connectCountdown = 0
 }
 
 async function refreshStatus() {
@@ -326,6 +351,10 @@ function connectionText(value) {
   if (value === 'connected') return '已连接'
   if (value === 'grace') return '宽限期'
   return '未连接'
+}
+
+function routePolicyText(value) {
+  return value === 'full' ? '全面回家' : '仅局域网'
 }
 
 function timeAgo(ts) {
@@ -593,14 +622,27 @@ function timeAgo(ts) {
             <span>备用虚拟网段</span>
             <input v-model="state.virtualCIDR" :disabled="state.connecting" />
           </label>
+          <div class="route-policy-grid">
+            <label :class="{ selected: state.routePolicy === 'lan' }">
+              <input v-model="state.routePolicy" type="radio" value="lan" :disabled="state.connecting" />
+              <Wifi :size="19" />
+              <span><strong>仅局域网</strong><small>只把家庭网段流量送入隧道。</small></span>
+            </label>
+            <label :class="{ selected: state.routePolicy === 'full' }">
+              <input v-model="state.routePolicy" type="radio" value="full" :disabled="state.connecting" />
+              <ShieldCheck :size="19" />
+              <span><strong>全面回家</strong><small>所有网络流量都经家庭网络出口。</small></span>
+            </label>
+          </div>
           <div class="action-summary">
             <span>目标家庭</span><strong>{{ currentFamily?.name }}</strong>
             <span>连接模式</span><strong>{{ state.networkMode === 'mapped' ? '虚拟映射' : '真实同网段' }}</strong>
+            <span>流量范围</span><strong>{{ routePolicyText(state.routePolicy) }}</strong>
           </div>
           <button type="submit" class="primary-button" :disabled="state.connecting">
             <Loader2 v-if="state.connecting" class="spin" :size="18" />
             <PlugZap v-else :size="18" />
-            {{ state.connecting ? '正在建立直连' : '建立直连' }}
+            {{ state.connecting ? `正在建立直连 · 剩余 ${state.connectCountdown || 0} 秒` : '建立直连' }}
           </button>
           <p v-if="state.error" class="error-text">{{ state.error }}</p>
         </form>

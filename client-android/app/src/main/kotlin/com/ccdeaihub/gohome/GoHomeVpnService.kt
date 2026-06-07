@@ -20,6 +20,7 @@ class GoHomeVpnService : VpnService() {
 
         val homeCidr = intent?.getStringExtra(EXTRA_HOME_CIDR)
         val virtualAddress = intent?.getStringExtra(EXTRA_VIRTUAL_ADDRESS)
+        val routePolicy = intent?.getStringExtra(EXTRA_ROUTE_POLICY) ?: ROUTE_POLICY_LAN
         if (homeCidr.isNullOrBlank() || virtualAddress.isNullOrBlank()) {
             Log.e(TAG, "Missing homeCidr=$homeCidr or virtualAddress=$virtualAddress")
             stopSelf()
@@ -38,12 +39,16 @@ class GoHomeVpnService : VpnService() {
 
         // Build and establish the VPN interface
         val newTunnel = try {
-            Builder()
+            val builder = Builder()
                 .setSession("Go Home")
                 .setMtu(1380)
                 .addAddress(virtualAddress, 32)
-                .addRoute(homeAddress, homePrefix)
-                .establish()
+            if (routePolicy == ROUTE_POLICY_FULL) {
+                builder.addRoute("0.0.0.0", 0)
+            } else {
+                builder.addRoute(homeAddress, homePrefix)
+            }
+            builder.establish()
         } catch (e: Exception) {
             Log.e(TAG, "VpnService.Builder.establish() failed", e)
             null
@@ -56,7 +61,7 @@ class GoHomeVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        Log.i(TAG, "VPN established: address=$virtualAddress route=$homeAddress/$homePrefix")
+        Log.i(TAG, "VPN established: address=$virtualAddress route=$homeAddress/$homePrefix policy=$routePolicy")
         tunnel = newTunnel
         establishedTunnel = true
         GoHomeTunnelRuntime.attachTunnel(tunnel)
@@ -82,8 +87,11 @@ class GoHomeVpnService : VpnService() {
     companion object {
         private const val TAG = "GoHomeVpn"
         private const val ACTION_PROTECT_SOCKET = "com.ccdeaihub.gohome.PROTECT_SOCKET"
+        private const val ROUTE_POLICY_FULL = "full"
+        private const val ROUTE_POLICY_LAN = "lan"
         const val EXTRA_HOME_CIDR = "home_cidr"
         const val EXTRA_VIRTUAL_ADDRESS = "virtual_address"
+        const val EXTRA_ROUTE_POLICY = "route_policy"
 
         fun protectTunnelSocket(context: Context) {
             val intent = Intent(context, GoHomeVpnService::class.java).setAction(ACTION_PROTECT_SOCKET)

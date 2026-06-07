@@ -17,8 +17,8 @@ type virtualLink struct {
 	once   sync.Once
 }
 
-func newVirtualLink(parent context.Context, client *punchClient, mode, homeIP, lanCIDR, virtualCIDR string) (*virtualLink, error) {
-	address, route, err := clientLinkAddress(mode, homeIP, lanCIDR, virtualCIDR)
+func newVirtualLink(parent context.Context, client *punchClient, mode, routePolicy, homeIP, lanCIDR, virtualCIDR string) (*virtualLink, error) {
+	address, route, err := clientLinkAddress(mode, routePolicy, homeIP, lanCIDR, virtualCIDR)
 	if err != nil {
 		return nil, err
 	}
@@ -92,19 +92,26 @@ func (l *virtualLink) writeLoop(ctx context.Context, client *punchClient) {
 	}
 }
 
-func clientLinkAddress(mode, homeIP, lanCIDR, virtualCIDR string) (string, string, error) {
+func clientLinkAddress(mode, routePolicy, homeIP, lanCIDR, virtualCIDR string) (string, string, error) {
 	ip, err := netip.ParseAddr(homeIP)
 	if err != nil || !ip.Is4() {
 		return "", "", fmt.Errorf("invalid home-side client IP %q", homeIP)
+	}
+	route := lanCIDR
+	if routePolicy == "full" {
+		route = "0.0.0.0/0"
 	}
 	if mode == "mapped" {
 		virtual, err := mappedIPv4(ip, lanCIDR, virtualCIDR)
 		if err != nil {
 			return "", "", err
 		}
-		return virtual.String(), virtualCIDR, nil
+		if routePolicy != "full" {
+			route = virtualCIDR
+		}
+		return virtual.String(), route, nil
 	}
-	return ip.String(), lanCIDR, nil
+	return ip.String(), route, nil
 }
 
 func mappedIPv4(ip netip.Addr, realCIDR, virtualCIDR string) (netip.Addr, error) {

@@ -101,18 +101,20 @@ const androidSignalAPI = {
         client_udp_ports: Array.isArray(prepared.udp_ports) ? prepared.udp_ports : [prepared.udp_port],
         preferred_mode: options.mode,
         virtual_cidr: options.virtual_cidr || '',
+        route_policy: options.route_policy || 'lan',
         client_virtual_mac: prepared.client_virtual_mac,
         fallback_sweep: attempt > 0
       })
 
       try {
         if (window.GoHomeNative.connectTunnelAsync) {
-          return await connectTunnelAsync(offer, options.mode, options.virtual_cidr || '')
+          return await connectTunnelAsync(offer, options.mode, options.virtual_cidr || '', options.route_policy || 'lan')
         }
         return readAndroidJSON(window.GoHomeNative.connectTunnel(
           JSON.stringify(offer),
           options.mode,
-          options.virtual_cidr || ''
+          options.virtual_cidr || '',
+          options.route_policy || 'lan'
         ))
       } catch (error) {
         lastError = error
@@ -169,10 +171,10 @@ const androidSignalAPI = {
  * when the native side calls window._goHomeTunnelResult().
  * This keeps the JS thread free so the UI can render loading states.
  */
-function connectTunnelAsync(offer, mode, virtualCIDR) {
+function connectTunnelAsync(offer, mode, virtualCIDR, routePolicy) {
   return new Promise((resolve, reject) => {
     const callbackId = window.GoHomeNative.connectTunnelAsync(
-      JSON.stringify(offer), mode, virtualCIDR
+      JSON.stringify(offer), mode, virtualCIDR, routePolicy || 'lan'
     )
     const timeout = setTimeout(() => {
       delete window._goHomeTunnelCallbacks[callbackId]
@@ -223,6 +225,7 @@ const controlAPI = {
         family_id: familyID,
         mode: options.mode,
         virtual_cidr: options.virtual_cidr || '',
+        route_policy: options.route_policy || 'lan',
         client_virtual_mac: options.client_virtual_mac || ''
       }
     })
