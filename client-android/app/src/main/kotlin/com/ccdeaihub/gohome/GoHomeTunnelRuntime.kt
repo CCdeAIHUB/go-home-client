@@ -387,10 +387,12 @@ object GoHomeTunnelRuntime {
         }
         val routeCIDR = if (mode == "mapped") virtualCIDR else realCIDR
         val clientAddress = if (mode == "mapped") mappedAddress(homeIP, realCIDR, virtualCIDR) else homeIP
+        val dnsServer = gatewayAddress(realCIDR)
         val intent = Intent(activity, GoHomeVpnService::class.java)
             .putExtra(GoHomeVpnService.EXTRA_HOME_CIDR, routeCIDR)
             .putExtra(GoHomeVpnService.EXTRA_VIRTUAL_ADDRESS, clientAddress)
             .putExtra(GoHomeVpnService.EXTRA_ROUTE_POLICY, normalizeRoutePolicy(routePolicy))
+            .putExtra(GoHomeVpnService.EXTRA_DNS_SERVER, dnsServer)
         // Must start the VPN service on the UI thread for Android compatibility
         val latch = java.util.concurrent.CountDownLatch(1)
         activity.runOnUiThread {
@@ -679,6 +681,13 @@ object GoHomeTunnelRuntime {
 
     private fun normalizeRoutePolicy(routePolicy: String): String {
         return if (routePolicy == "full") "full" else "lan"
+    }
+
+    private fun gatewayAddress(cidr: String): String {
+        val prefix = IPv4Prefix.parse(cidr) ?: return ""
+        val bytes = prefix.network.copyOf()
+        bytes[3] = 1
+        return InetAddress.getByAddress(bytes).hostAddress ?: ""
     }
 
     private fun peerBaseCandidates(peer: JSONObject): MutableList<InetSocketAddress> {

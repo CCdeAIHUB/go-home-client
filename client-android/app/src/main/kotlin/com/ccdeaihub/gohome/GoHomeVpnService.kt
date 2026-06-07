@@ -21,6 +21,7 @@ class GoHomeVpnService : VpnService() {
         val homeCidr = intent?.getStringExtra(EXTRA_HOME_CIDR)
         val virtualAddress = intent?.getStringExtra(EXTRA_VIRTUAL_ADDRESS)
         val routePolicy = intent?.getStringExtra(EXTRA_ROUTE_POLICY) ?: ROUTE_POLICY_LAN
+        val dnsServer = intent?.getStringExtra(EXTRA_DNS_SERVER) ?: ""
         if (homeCidr.isNullOrBlank() || virtualAddress.isNullOrBlank()) {
             Log.e(TAG, "Missing homeCidr=$homeCidr or virtualAddress=$virtualAddress")
             stopSelf()
@@ -45,6 +46,9 @@ class GoHomeVpnService : VpnService() {
                 .addAddress(virtualAddress, 32)
             if (routePolicy == ROUTE_POLICY_FULL) {
                 builder.addRoute("0.0.0.0", 0)
+                if (dnsServer.isNotBlank()) {
+                    builder.addDnsServer(dnsServer)
+                }
             } else {
                 builder.addRoute(homeAddress, homePrefix)
             }
@@ -92,6 +96,7 @@ class GoHomeVpnService : VpnService() {
         const val EXTRA_HOME_CIDR = "home_cidr"
         const val EXTRA_VIRTUAL_ADDRESS = "virtual_address"
         const val EXTRA_ROUTE_POLICY = "route_policy"
+        const val EXTRA_DNS_SERVER = "dns_server"
 
         fun protectTunnelSocket(context: Context) {
             val intent = Intent(context, GoHomeVpnService::class.java).setAction(ACTION_PROTECT_SOCKET)
