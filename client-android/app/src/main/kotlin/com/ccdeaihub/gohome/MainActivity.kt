@@ -4,8 +4,10 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.graphics.Color
 import android.net.Uri
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.webkit.JavascriptInterface
@@ -30,6 +32,7 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applySystemBars("light")
 
         val wv = WebView(this)
         webView = wv
@@ -59,6 +62,26 @@ class MainActivity : Activity() {
                     Log.e("GoHome", "Failed to post server event", e)
                 }
             }
+        }
+    }
+
+    private fun applySystemBars(themeName: String) {
+        val dark = themeName == "dark"
+        runOnUiThread {
+            window.statusBarColor = Color.parseColor(if (dark) "#0F1413" else "#245F73")
+            window.navigationBarColor = Color.parseColor(if (dark) "#0F1413" else "#EEF3EF")
+            var flags = window.decorView.systemUiVisibility
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags = flags and android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags = if (dark) {
+                    flags and android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR.inv()
+                } else {
+                    flags or android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+                }
+            }
+            window.decorView.systemUiVisibility = flags
         }
     }
 
@@ -92,6 +115,12 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun status(): String = "native-shell-ready"
+
+        @JavascriptInterface
+        fun setTheme(themeName: String): Boolean {
+            activity.applySystemBars(themeName)
+            return true
+        }
 
         @JavascriptInterface
         fun deviceId(): String {

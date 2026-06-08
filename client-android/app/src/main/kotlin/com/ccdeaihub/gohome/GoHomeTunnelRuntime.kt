@@ -692,11 +692,7 @@ object GoHomeTunnelRuntime {
 
     private fun vpnDnsServers(realCIDR: String, routePolicy: String): String {
         val gateway = gatewayAddress(realCIDR)
-        if (normalizeRoutePolicy(routePolicy) != "full") return gateway
-        return listOf("223.5.5.5", "119.29.29.29", gateway)
-            .filter { it.isNotBlank() }
-            .distinct()
-            .joinToString(",")
+        return gateway
     }
 
     private fun peerBaseCandidates(peer: JSONObject): MutableList<InetSocketAddress> {

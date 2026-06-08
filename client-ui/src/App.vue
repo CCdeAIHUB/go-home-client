@@ -120,6 +120,7 @@ function applyTheme(value) {
     ? (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
     : value
   document.documentElement.dataset.theme = activeTheme.value
+  backend.setSystemTheme?.(activeTheme.value)
 }
 
 function setTheme(value) {

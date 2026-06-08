@@ -135,6 +135,12 @@ const androidSignalAPI = {
   async checkUpdate() {
     return { current: '0.2.0', latest: '0.2.0', update: false, configured: false }
   },
+  setSystemTheme(theme) {
+    if (window.GoHomeNative.setTheme) {
+      window.GoHomeNative.setTheme(theme)
+    }
+    return true
+  },
   // Family detail APIs
   async listFamilyDevices(familyID) {
     try {
@@ -238,6 +244,9 @@ const controlAPI = {
   },
   async checkUpdate() {
     return request('/api/update')
+  },
+  setSystemTheme() {
+    return true
   },
   async listFamilyDevices(familyID) {
     return request(`/api/families/${familyID}/devices`)

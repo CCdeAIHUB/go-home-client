@@ -13,5 +13,7 @@ Android 客户端当前提供可编译的 Kotlin + WebView 壳：
 - `VpnService` 家庭网段分流。
 - UDP 打洞、SM2 会话密钥封装和 SM4-GCM 隧道帧。
 - 家庭真实网段冲突检测、备用 `/24` 虚拟网段映射、设备映射与隧道流量状态。
+- 全面回家模式下使用家庭路由器 DNS，让路由器侧代理规则有机会按普通 LAN 设备处理。
+- 深色模式会同步 Android 状态栏与底部导航栏背景。
 
-后续继续补齐移动端前后台保活、断线宽限期恢复、日志和 OTA 原生交互。
+构建方式见仓库根目录 README。GitHub Actions 每次推送 `main` 后会生成 `go-home-android-debug-apk`。
