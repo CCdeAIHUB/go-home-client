@@ -691,6 +691,7 @@ object GoHomeTunnelRuntime {
     }
 
     private fun vpnDnsServers(realCIDR: String, routePolicy: String): String {
+        if (normalizeRoutePolicy(routePolicy) != "full") return ""
         val gateway = gatewayAddress(realCIDR)
         return gateway
     }
