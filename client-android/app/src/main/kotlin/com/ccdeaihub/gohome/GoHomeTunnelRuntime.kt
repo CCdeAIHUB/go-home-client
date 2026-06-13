@@ -57,6 +57,7 @@ object GoHomeTunnelRuntime {
     private const val FULL_PORT_SWEEP_SOCKET_INDEX = 1
     private const val KEEPALIVE_INTERVAL_MS = 3_000L
     private const val TUNNEL_STALE_TIMEOUT_MS = 30_000L
+    private const val FULL_HOME_DNS_SERVER = "100.64.77.1"
     private val magic = byteArrayOf('G'.code.toByte(), 'H'.code.toByte(), 'U'.code.toByte(), '1'.code.toByte())
     private val random = SecureRandom()
     private val lock = Object()
@@ -692,8 +693,7 @@ object GoHomeTunnelRuntime {
 
     private fun vpnDnsServers(realCIDR: String, routePolicy: String): String {
         if (normalizeRoutePolicy(routePolicy) != "full") return ""
-        val gateway = gatewayAddress(realCIDR)
-        return gateway
+        return FULL_HOME_DNS_SERVER
     }
 
     private fun peerBaseCandidates(peer: JSONObject): MutableList<InetSocketAddress> {
