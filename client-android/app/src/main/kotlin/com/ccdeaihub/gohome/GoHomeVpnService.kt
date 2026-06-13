@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.system.OsConstants
 import android.util.Log
 
 class GoHomeVpnService : VpnService() {
@@ -44,6 +45,7 @@ class GoHomeVpnService : VpnService() {
                 .setSession("Go Home")
                 .setMtu(1380)
                 .addAddress(virtualAddress, 32)
+                .allowFamily(OsConstants.AF_INET)
             if (routePolicy == ROUTE_POLICY_FULL) {
                 builder.addRoute("0.0.0.0", 0)
                 dnsServer.split(",")
