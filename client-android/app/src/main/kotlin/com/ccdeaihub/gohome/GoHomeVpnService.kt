@@ -46,6 +46,8 @@ class GoHomeVpnService : VpnService() {
                 .setMtu(1380)
                 .addAddress(virtualAddress, 32)
                 .allowFamily(OsConstants.AF_INET)
+            runCatching { builder.addDisallowedApplication(packageName) }
+                .onFailure { Log.w(TAG, "Unable to exclude Go Home control traffic from VPN", it) }
             if (routePolicy == ROUTE_POLICY_FULL) {
                 builder.addRoute("0.0.0.0", 0)
                 dnsServer.split(",")
