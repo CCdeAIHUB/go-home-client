@@ -57,6 +57,8 @@ Open the repository Actions page, choose the latest successful CI run, and downl
 - LAN-only route policy sends only home LAN traffic through the tunnel.
 - Full-home route policy sends all client traffic through the home network and uses the home router DNS path so router-side proxy policies can apply.
 
+On Android, Go Home excludes its own control traffic from the VPN route. This prevents WebSocket signaling and UDP tunnel maintenance from being looped back through the full-home VPN while all other app traffic can still use the home network path.
+
 ## Privacy Note
 
 The UI must not ship with a personal server address, password, or authorization code. Recent servers are stored only in the local device storage after the user enters them.
