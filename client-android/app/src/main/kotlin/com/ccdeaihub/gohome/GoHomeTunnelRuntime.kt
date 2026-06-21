@@ -1,6 +1,7 @@
 package com.ccdeaihub.gohome
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
@@ -80,6 +81,7 @@ object GoHomeTunnelRuntime {
     private var tunnelFd: ParcelFileDescriptor? = null
     private var tunInput: FileInputStream? = null
     private var tunOutput: FileOutputStream? = null
+    private var appContext: Context? = null
     private val pendingPunchCandidates = mutableMapOf<String, MutableList<InetSocketAddress>>()
 
     fun prepare(deviceID: String): JSONObject {
@@ -112,6 +114,18 @@ object GoHomeTunnelRuntime {
     }
 
     fun connect(activity: Activity, rawOffer: String, mode: String, virtualCIDR: String, routePolicy: String): JSONObject {
+        appContext = activity.applicationContext
+        runCatching { GoHomeTunnelForegroundService.start(activity.applicationContext) }
+            .onFailure { android.util.Log.w("GoHomeTunnel", "Unable to start foreground tunnel guard", it) }
+        try {
+            return connectWithForegroundGuard(activity, rawOffer, mode, virtualCIDR, routePolicy)
+        } catch (error: Exception) {
+            GoHomeTunnelForegroundService.stop(activity.applicationContext)
+            throw error
+        }
+    }
+
+    private fun connectWithForegroundGuard(activity: Activity, rawOffer: String, mode: String, virtualCIDR: String, routePolicy: String): JSONObject {
         val offer = JSONObject(rawOffer)
         val currentSockets = synchronized(lock) { punchSockets.toList() }
         if (currentSockets.isEmpty()) throw IllegalStateException("UDP socket is not prepared")
@@ -319,6 +333,7 @@ object GoHomeTunnelRuntime {
     fun stop(activity: Activity?) {
         closeTunnelResources("user disconnected", clearIdentity = true)
         activity?.stopService(Intent(activity, GoHomeVpnService::class.java))
+        GoHomeTunnelForegroundService.stop(activity?.applicationContext ?: appContext)
     }
 
     private fun closeTunnelResources(reason: String, clearIdentity: Boolean) {
@@ -360,6 +375,7 @@ object GoHomeTunnelRuntime {
         runCatching { currentInput?.close() }
         runCatching { currentOutput?.close() }
         runCatching { currentTunnel?.close() }
+        GoHomeTunnelForegroundService.stop(appContext)
         if (reason.isNotBlank() && reason != "user disconnected") {
             android.util.Log.w("GoHomeTunnel", reason)
         }

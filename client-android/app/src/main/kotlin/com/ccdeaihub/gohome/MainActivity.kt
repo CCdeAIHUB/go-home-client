@@ -10,10 +10,14 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowInsets
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.widget.FrameLayout
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
 import org.bouncycastle.crypto.digests.SM3Digest
@@ -34,6 +38,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         applySystemBars("light")
 
+        val root = FrameLayout(this)
         val wv = WebView(this)
         webView = wv
         val assetLoader = WebViewAssetLoader.Builder()
@@ -48,7 +53,12 @@ class MainActivity : Activity() {
         wv.webViewClient = LocalContentClient(assetLoader)
         wv.addJavascriptInterface(GoHomeBridge(this), "GoHomeNative")
         wv.loadUrl("https://appassets.androidplatform.net/assets/ui/index.html")
-        setContentView(wv)
+        root.addView(
+            wv,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
+        applyContentInsets(root)
+        setContentView(root)
 
         // 服务器推送事件回调：家庭服务器状态变更时通知 WebView 刷新
         GoHomeSignalClient.onEventCallback = { action, params ->
@@ -63,6 +73,26 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun applyContentInsets(root: View) {
+        root.setOnApplyWindowInsetsListener { view, insets ->
+            val top: Int
+            val bottom: Int
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val bars = insets.getInsets(WindowInsets.Type.systemBars())
+                top = bars.top
+                bottom = bars.bottom
+            } else {
+                @Suppress("DEPRECATION")
+                top = insets.systemWindowInsetTop
+                @Suppress("DEPRECATION")
+                bottom = insets.systemWindowInsetBottom
+            }
+            view.setPadding(0, top, 0, bottom)
+            insets
+        }
+        root.requestApplyInsets()
     }
 
     private fun applySystemBars(themeName: String) {
