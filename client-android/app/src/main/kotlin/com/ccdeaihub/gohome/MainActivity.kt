@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     private var vpnPermissionGranted = false
     private var vpnPermissionLatch: CountDownLatch? = null
     private var webView: WebView? = null
+    private var contentRoot: View? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,6 +40,8 @@ class MainActivity : Activity() {
         applySystemBars("light")
 
         val root = FrameLayout(this)
+        contentRoot = root
+        root.setBackgroundColor(Color.parseColor("#EEF3EF"))
         val wv = WebView(this)
         webView = wv
         val assetLoader = WebViewAssetLoader.Builder()
@@ -98,11 +101,23 @@ class MainActivity : Activity() {
     private fun applySystemBars(themeName: String) {
         val dark = themeName == "dark"
         runOnUiThread {
-            window.statusBarColor = Color.parseColor(if (dark) "#0F1413" else "#245F73")
-            window.navigationBarColor = Color.parseColor(if (dark) "#0F1413" else "#EEF3EF")
+            val surfaceColor = Color.parseColor(if (dark) "#0F1413" else "#EEF3EF")
+            val statusColor = Color.parseColor(if (dark) "#0F1413" else "#245F73")
+            window.statusBarColor = statusColor
+            window.navigationBarColor = surfaceColor
+            window.decorView.setBackgroundColor(surfaceColor)
+            contentRoot?.setBackgroundColor(surfaceColor)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isStatusBarContrastEnforced = false
+                window.isNavigationBarContrastEnforced = false
+            }
             var flags = window.decorView.systemUiVisibility
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                flags = flags and android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+                flags = if (dark) {
+                    flags and android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR.inv()
+                } else {
+                    flags or android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 flags = if (dark) {
